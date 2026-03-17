@@ -1,0 +1,4 @@
+interface:
+  display_name: "peye"
+  short_description: "Compare UI screenshots against Figma references"
+  default_prompt: "Use $peye to compare a preview URL or screenshot against a Figma node or local reference and summarize the visual mismatches."

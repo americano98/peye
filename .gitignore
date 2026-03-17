@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+coverage
+playwright-report
+test-output
+peye-output
+*.log
+*.tgz
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
