@@ -1,11 +1,14 @@
 {
-  "name": "peye",
+  "name": "@americano98/peye",
   "version": "0.1.0",
   "description": "Standalone CLI for visual diffing UI screenshots against Figma references.",
   "type": "module",
   "packageManager": "pnpm@10.11.0",
   "bin": {
-    "peye": "./dist/bin.js"
+    "peye": "dist/bin.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist"

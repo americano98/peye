@@ -49,7 +49,7 @@ node dist/bin.js --version
 After publishing, install the CLI globally with:
 
 ```bash
-npm install -g peye
+npm install -g @americano98/peye
 peye --help
 ```
 
