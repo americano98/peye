@@ -73,7 +73,7 @@ When using `peye` during implementation:
 4. If `summary.requiresRecapture` is `true`, fix setup or recapture before changing implementation code.
 5. Read `summary.decisionTrace[0]` to understand why the current verdict was chosen.
 6. Read `summary.primaryBlockers[0]` before changing code.
-7. If setup is sound and `summary.topActions[0]` points at a concrete DOM target, use that as the default next fix.
+7. If setup is sound and the top finding exposes `element.selector`, use that as the default next fix target.
 8. If `findings` looks small but `rollups.omittedFindings > 0` or `rollups.tailAreaPercent` is still substantial, treat the issue as broader than the visible top-N details.
 9. Rerun `peye` into the same cleaned scratch directory.
 10. Stop when the result is `pass`, `pass_with_tolerated_differences`, or `needs_human_review`.

@@ -109,7 +109,7 @@ function buildDecisionContext(params: {
   const findingsCount = params.findings.length;
   const hasDomFindings = params.findings.some((finding) => finding.source === "dom-element");
   const actionableFindingCount = hasDomFindings
-    ? params.findings.filter((finding) => finding.actionTarget?.selector).length
+    ? params.findings.filter((finding) => finding.element?.selector).length
     : 0;
 
   return {

@@ -14,29 +14,33 @@ import type {
   DomSnapshotElement,
 } from "../types/internal.js";
 import type {
-  ActionTargetReport,
   AffectedPropertyCode,
   AnalysisMode,
   BoundingBox,
   CaptureEdge,
+  ComputedStyleSubsetReport,
+  ElementIdentityReport,
+  ElementLocatorReport,
   FindingCode,
   FindingContextReport,
   FindingElementReport,
-  FindingEvidenceRefReport,
   FindingReport,
-  FindingMetricKey,
   FindingSignalReport,
   FindingSource,
+  InteractivityStateReport,
   IssueType,
   KindRollup,
   OmittedRegionRollup,
   OmittedSelectorRollup,
+  OverlapHintsReport,
   RegionKind,
   RollupsReport,
   RootCauseGroupId,
   Severity,
   SeverityRollup,
   TagRollup,
+  TextLayoutReport,
+  VisibilityStateReport,
 } from "../types/report.js";
 import { rootCauseGroupIdForFinding } from "./root-cause-groups.js";
 import { AppError } from "../utils/errors.js";
@@ -58,11 +62,9 @@ interface DraftFinding {
   issueTypes: IssueType[];
   likelyAffectedProperties: AffectedPropertyCode[];
   signals: FindingSignalReport[];
-  evidenceRefs: FindingEvidenceRefReport[];
   hotspots: BoundingBox[];
-  actionTarget: ActionTargetReport | null;
-  element: FindingElementReport | null;
-  context: FindingContextReport | null;
+  element?: DetailedFindingElementReport;
+  context?: FindingContextReport;
 }
 
 interface DraftFindingGroup {
@@ -73,9 +75,39 @@ interface DraftFindingGroup {
 interface DomAssignmentResult {
   candidate: DomBindingCandidate;
   anchor: DomSnapshotElement;
-  context: FindingContextReport;
+  context: DetailedFindingContext;
   assignmentConfidence: number;
   region: ComparisonRegion;
+}
+
+interface DetailedFindingBindingReport {
+  assignmentMethod: FindingContextReport["binding"]["assignmentMethod"];
+  assignmentConfidence: number;
+  candidateCount: number;
+  overlapScore: number;
+  depthScore: number;
+  fallbackMarker: Exclude<FindingContextReport["binding"]["fallbackMarker"], undefined> | "none";
+  selectedCandidate: ElementLocatorReport;
+  anchorElement: ElementLocatorReport;
+}
+
+interface DetailedFindingElementReport extends FindingElementReport {
+  bbox: BoundingBox;
+}
+
+interface DetailedFindingSemanticContextReport {
+  ancestry: ElementLocatorReport[];
+  identity: ElementIdentityReport;
+  computedStyle: ComputedStyleSubsetReport;
+  textLayout: TextLayoutReport | null;
+  visibility: VisibilityStateReport;
+  interactivity: InteractivityStateReport;
+  overlapHints: OverlapHintsReport;
+}
+
+interface DetailedFindingContext {
+  binding: DetailedFindingBindingReport;
+  semantic: DetailedFindingSemanticContextReport;
 }
 
 export interface FindingVisualization {
@@ -215,10 +247,7 @@ function assignStableFindingIds(
       });
   }
 
-  return findings.map((finding, index) => ({
-    id: ids[index],
-    ...finding,
-  }));
+  return findings.map((finding, index) => toFindingReport(ids[index], finding));
 }
 
 function buildStableFindingBaseId(
@@ -254,16 +283,12 @@ function normalizeBoxForStableSignature(
   ];
 }
 
-function primaryBoxForFinding(
-  finding: Pick<DraftFinding, "bbox" | "element"> | Pick<FindingReport, "bbox" | "element">,
-): BoundingBox {
+function primaryBoxForFinding(finding: Pick<DraftFinding, "bbox" | "element">): BoundingBox {
   return finding.element?.bbox ?? finding.bbox;
 }
 
 function targetKeyForFinding(
-  finding:
-    | Pick<DraftFinding, "actionTarget" | "element">
-    | Pick<FindingReport, "actionTarget" | "element">,
+  finding: Pick<DraftFinding, "element"> | Pick<FindingReport, "element">,
 ): string {
   const selector = selectorHintForFinding(finding);
 
@@ -275,23 +300,17 @@ function targetKeyForFinding(
 }
 
 function selectorHintForFinding(
-  finding:
-    | Pick<DraftFinding, "actionTarget" | "element">
-    | Pick<FindingReport, "actionTarget" | "element">,
+  finding: Pick<DraftFinding, "element"> | Pick<FindingReport, "element">,
 ): string | null {
-  return finding.actionTarget?.selector ?? finding.element?.selector ?? null;
+  return finding.element?.selector ?? null;
 }
 
 function fallbackTargetKeyForFinding(
-  finding:
-    | Pick<DraftFinding, "actionTarget" | "element">
-    | Pick<FindingReport, "actionTarget" | "element">,
+  finding: Pick<DraftFinding, "element"> | Pick<FindingReport, "element">,
 ): string {
-  const tag = normalizeTargetFragment(finding.element?.tag ?? finding.actionTarget?.tag ?? null);
-  const role = normalizeTargetFragment(finding.element?.role ?? finding.actionTarget?.role ?? null);
-  const textSnippet = normalizeTargetFragment(
-    finding.element?.textSnippet ?? finding.actionTarget?.textSnippet ?? null,
-  );
+  const tag = normalizeTargetFragment(finding.element?.tag ?? null);
+  const role = normalizeTargetFragment(finding.element?.role ?? null);
+  const textSnippet = normalizeTargetFragment(finding.element?.textSnippet ?? null);
 
   if (tag === null && role === null && textSnippet === null) {
     return "visual-cluster";
@@ -370,13 +389,26 @@ function buildDomFindings(
       assignments: DomAssignmentResult[];
     }
   >();
+  const fallbackRegions: ComparisonRegion[] = [];
 
   for (const region of rawRegions) {
-    const assignment = resolveDomAssignmentForRegion(
-      region,
-      domSnapshot.bindingCandidates,
-      anchorsById,
-    );
+    let assignment: DomAssignmentResult;
+
+    try {
+      assignment = resolveDomAssignmentForRegion(
+        region,
+        domSnapshot.bindingCandidates,
+        anchorsById,
+      );
+    } catch (error) {
+      if (isRecoverableDomAssignmentFailure(error)) {
+        fallbackRegions.push(region);
+        continue;
+      }
+
+      throw error;
+    }
+
     const existing = groupsByAnchorId.get(assignment.anchor.id);
 
     if (existing) {
@@ -391,23 +423,39 @@ function buildDomFindings(
     }
   }
 
-  return Array.from(groupsByAnchorId.values(), ({ anchor, regions, assignments }) => {
-    const representativeAssignment = selectRepresentativeDomAssignment(assignments);
+  const domFindingGroups = Array.from(
+    groupsByAnchorId.values(),
+    ({ anchor, regions, assignments }) => {
+      const representativeAssignment = selectRepresentativeDomAssignment(assignments);
 
-    return {
-      finding: buildDraftFinding({
-        source: "dom-element",
+      return {
+        finding: buildDraftFinding({
+          source: "dom-element",
+          regions,
+          totalPixels,
+          element: anchor,
+          signalElement: representativeAssignment.candidate,
+          context: representativeAssignment.context,
+          canvasWidth: width,
+          canvasHeight: height,
+        }),
         regions,
-        totalPixels,
-        element: anchor,
-        signalElement: representativeAssignment.candidate,
-        context: representativeAssignment.context,
-        canvasWidth: width,
-        canvasHeight: height,
-      }),
-      regions,
-    };
-  });
+      };
+    },
+  );
+
+  if (fallbackRegions.length === 0) {
+    return domFindingGroups;
+  }
+
+  return [
+    ...domFindingGroups,
+    ...buildVisualClusterFindings(fallbackRegions, totalPixels, width, height),
+  ];
+}
+
+function isRecoverableDomAssignmentFailure(error: unknown): boolean {
+  return error instanceof AppError && error.code === "dom_region_assignment_failed";
 }
 
 function buildVisualClusterFindings(
@@ -442,15 +490,14 @@ function buildDraftFinding(params: {
   totalPixels: number;
   element: DomSnapshotElement | null;
   signalElement: DomSnapshotElement | null;
-  context: FindingContextReport | null;
+  context: DetailedFindingContext | null;
   canvasWidth: number;
   canvasHeight: number;
 }): DraftFinding {
   const bbox = unionRegionBoxes(params.regions);
   const mismatchPixels = params.regions.reduce((sum, region) => sum + region.pixelCount, 0);
   const kind = aggregateKind(params.regions);
-  const elementReport = params.element ? toElementReport(params.element) : null;
-  const actionTarget = params.element ? toActionTargetReport(params.element) : null;
+  const elementReport = params.element ? toElementReport(params.element) : undefined;
   const primaryBox = elementReport?.bbox ?? bbox;
   const signals = buildFindingSignals({
     kind,
@@ -462,10 +509,10 @@ function buildDraftFinding(params: {
   const code = buildFindingCode(kind, signals);
   const hotspots = buildHotspotBoxes(params.regions, primaryBox);
   const issueTypes = issueTypesForKind(kind);
-  const findingWithoutRootCause = {
+  const findingWithoutRootCause: Pick<FindingReport, "code" | "signals" | "element"> = {
     code,
     signals,
-    element: elementReport,
+    ...(elementReport ? { element: elementReport } : {}),
   };
 
   return {
@@ -478,7 +525,7 @@ function buildDraftFinding(params: {
       source: params.source,
       kind,
       signals,
-      actionTarget,
+      element: elementReport,
     }),
     summary: buildFindingSummary(kind, elementReport?.tag ?? null),
     fixHint: findingFixHintForCode(code),
@@ -492,11 +539,9 @@ function buildDraftFinding(params: {
     issueTypes,
     likelyAffectedProperties: findingAffectedPropertiesForCode(code),
     signals,
-    evidenceRefs: buildFindingEvidenceRefs(code, signals, hotspots),
     hotspots,
-    actionTarget,
-    element: elementReport,
-    context: params.context,
+    ...(elementReport ? { element: elementReport } : {}),
+    ...(params.context ? { context: compactFindingContext(params.context) } : {}),
   };
 }
 
@@ -938,14 +983,14 @@ function buildFindingConfidence(params: {
   source: FindingSource;
   kind: RegionKind;
   signals: FindingSignalReport[];
-  actionTarget: ActionTargetReport | null;
+  element: Pick<FindingElementReport, "selector"> | undefined;
 }): number {
   const baseline = baselineFindingConfidence(params.source, params.kind);
   const signalScore = params.signals.reduce((maxScore, signal) => {
     const score = signalConfidenceScore(signal.confidence);
     return score > maxScore ? score : maxScore;
   }, 0);
-  const selectorBonus = params.actionTarget?.selector ? 0.05 : 0;
+  const selectorBonus = params.element?.selector ? 0.05 : 0;
 
   return roundConfidence(Math.max(baseline, signalScore) + selectorBonus);
 }
@@ -983,63 +1028,6 @@ function signalConfidenceScore(confidence: FindingSignalReport["confidence"]): n
     case "low":
     default:
       return 0.55;
-  }
-}
-
-function buildFindingEvidenceRefs(
-  code: FindingCode,
-  signals: FindingSignalReport[],
-  hotspots: BoundingBox[],
-): FindingEvidenceRefReport[] {
-  const evidenceRefs: FindingEvidenceRefReport[] = signals.map((signal) => ({
-    type: "signal",
-    code: signal.code,
-  }));
-  const metricKey = metricKeyForFindingCode(code);
-
-  if (metricKey) {
-    evidenceRefs.push({
-      type: "metric",
-      key: metricKey,
-    });
-  }
-
-  for (let index = 0; index < hotspots.length; index += 1) {
-    evidenceRefs.push({
-      type: "hotspot",
-      index,
-    });
-  }
-
-  evidenceRefs.push(
-    {
-      type: "artifact",
-      key: "heatmap",
-    },
-    {
-      type: "artifact",
-      key: "diff",
-    },
-  );
-
-  return evidenceRefs;
-}
-
-function metricKeyForFindingCode(code: FindingCode): FindingMetricKey {
-  switch (code) {
-    case "viewport_mismatch":
-    case "missing_or_extra_content":
-      return "dimensionMismatch";
-    case "layout_mismatch":
-    case "layout_style_mismatch":
-      return "structuralMismatchPercent";
-    case "style_mismatch":
-      return "meanColorDelta";
-    case "text_clipping":
-    case "capture_crop":
-    case "rendering_mismatch":
-    default:
-      return "mismatchPercent";
   }
 }
 
@@ -1191,24 +1179,86 @@ function formatEdgeList(edges: CaptureEdge[]): string {
   return `${edges.slice(0, -1).join(", ")}, and ${edges[edges.length - 1]}`;
 }
 
-function toElementReport(element: DomSnapshotElement): FindingElementReport {
-  return {
+function toElementReport(element: DomSnapshotElement): DetailedFindingElementReport {
+  const report: DetailedFindingElementReport = {
     tag: element.tag,
     selector: element.selector,
-    role: element.role,
-    testId: element.testId,
-    textSnippet: element.textSnippet,
     bbox: element.bbox,
+  };
+
+  if (element.role) {
+    report.role = element.role;
+  }
+
+  if (element.testId) {
+    report.testId = element.testId;
+  }
+
+  if (element.textSnippet) {
+    report.textSnippet = element.textSnippet;
+  }
+
+  return report;
+}
+
+function compactFindingContext(context: DetailedFindingContext): FindingContextReport {
+  const binding: FindingContextReport["binding"] = {
+    assignmentMethod: context.binding.assignmentMethod,
+    assignmentConfidence: context.binding.assignmentConfidence,
+  };
+
+  if (context.binding.fallbackMarker !== "none") {
+    binding.fallbackMarker = context.binding.fallbackMarker;
+  }
+
+  const semantic: NonNullable<FindingContextReport["semantic"]> = {};
+
+  semantic.computedStyle = context.semantic.computedStyle;
+
+  if (context.semantic.textLayout) {
+    semantic.textLayout = context.semantic.textLayout;
+  }
+
+  if (context.semantic.overlapHints.captureClippedEdges.length > 0) {
+    semantic.captureClippedEdges = context.semantic.overlapHints.captureClippedEdges;
+  }
+
+  return {
+    binding,
+    ...(Object.keys(semantic).length > 0 ? { semantic } : {}),
   };
 }
 
-function toActionTargetReport(element: DomSnapshotElement): ActionTargetReport {
+function toFindingReport(id: string, finding: DraftFinding): FindingReport {
   return {
-    selector: element.selector,
-    tag: element.tag,
-    role: element.role,
-    testId: element.testId,
-    textSnippet: element.textSnippet,
+    id,
+    rootCauseGroupId: finding.rootCauseGroupId,
+    source: finding.source,
+    kind: finding.kind,
+    code: finding.code,
+    severity: finding.severity,
+    confidence: finding.confidence,
+    summary: finding.summary,
+    fixHint: finding.fixHint,
+    bbox: finding.bbox,
+    regionCount: finding.regionCount,
+    mismatchPixels: finding.mismatchPixels,
+    mismatchPercentOfCanvas: finding.mismatchPercentOfCanvas,
+    issueTypes: finding.issueTypes,
+    likelyAffectedProperties: finding.likelyAffectedProperties,
+    signals: finding.signals,
+    ...(finding.element
+      ? {
+          element: {
+            tag: finding.element.tag,
+            selector: finding.element.selector,
+            ...(finding.element.role ? { role: finding.element.role } : {}),
+            ...(finding.element.testId ? { testId: finding.element.testId } : {}),
+            ...(finding.element.textSnippet ? { textSnippet: finding.element.textSnippet } : {}),
+          },
+        }
+      : {}),
+    ...(finding.context ? { context: finding.context } : {}),
   };
 }
 
@@ -1333,7 +1383,13 @@ function buildLargestOmittedRegions(findings: FindingReport[]): OmittedRegionRol
     }));
 }
 
-function compareDraftFindings(left: DraftFinding, right: DraftFinding): number {
+function compareDraftFindings(
+  left: Pick<DraftFinding, "severity" | "mismatchPixels" | "bbox" | "summary" | "rootCauseGroupId">,
+  right: Pick<
+    DraftFinding,
+    "severity" | "mismatchPixels" | "bbox" | "summary" | "rootCauseGroupId"
+  >,
+): number {
   const severityOrder = compareSeverityDescending(left.severity, right.severity);
 
   if (severityOrder !== 0) {

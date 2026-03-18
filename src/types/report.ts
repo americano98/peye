@@ -95,12 +95,6 @@ export const AFFECTED_PROPERTY_CODES = [
   "capture.viewport",
   "reference.frame",
 ] as const;
-export const FINDING_METRIC_KEYS = [
-  "mismatchPercent",
-  "structuralMismatchPercent",
-  "dimensionMismatch",
-  "meanColorDelta",
-] as const;
 export const DECISION_TRACE_METRIC_KEYS = [
   "mismatchPercent",
   "structuralMismatchPercent",
@@ -109,7 +103,6 @@ export const DECISION_TRACE_METRIC_KEYS = [
   "ignoredPercent",
   "dimensionMismatch",
 ] as const;
-export const FINDING_ARTIFACT_KEYS = ["heatmap", "diff"] as const;
 export const SIGNAL_CONFIDENCES = ["low", "medium", "high"] as const;
 
 export type CompareMode = (typeof COMPARE_MODES)[number];
@@ -123,9 +116,7 @@ export type DecisionTraceCode = (typeof DECISION_TRACE_CODES)[number];
 export type RootCauseCode = (typeof ROOT_CAUSE_CODES)[number];
 export type RootCauseGroupId = (typeof ROOT_CAUSE_GROUP_IDS)[number];
 export type AffectedPropertyCode = (typeof AFFECTED_PROPERTY_CODES)[number];
-export type FindingMetricKey = (typeof FINDING_METRIC_KEYS)[number];
 export type DecisionTraceMetricKey = (typeof DECISION_TRACE_METRIC_KEYS)[number];
-export type FindingArtifactKey = (typeof FINDING_ARTIFACT_KEYS)[number];
 export type SignalConfidence = (typeof SIGNAL_CONFIDENCES)[number];
 
 export type Recommendation =
@@ -245,24 +236,15 @@ export interface ErrorReport {
 export interface FindingElementReport {
   tag: string;
   selector: string;
-  role: string | null;
-  testId: string | null;
-  textSnippet: string | null;
-  bbox: BoundingBox;
+  role?: string;
+  testId?: string;
+  textSnippet?: string;
 }
 
 export interface FindingSignalReport {
   code: FindingSignalCode;
   confidence: SignalConfidence;
   message: string;
-}
-
-export interface ActionTargetReport {
-  selector: string;
-  tag: string;
-  role: string | null;
-  testId: string | null;
-  textSnippet: string | null;
 }
 
 export interface ElementLocatorReport {
@@ -331,46 +313,19 @@ export interface OverlapHintsReport {
 export interface FindingBindingReport {
   assignmentMethod: FindingAssignmentMethod;
   assignmentConfidence: number;
-  candidateCount: number;
-  overlapScore: number;
-  depthScore: number;
-  fallbackMarker: FindingAssignmentFallbackMarker;
-  selectedCandidate: ElementLocatorReport;
-  anchorElement: ElementLocatorReport;
+  fallbackMarker?: Exclude<FindingAssignmentFallbackMarker, "none">;
 }
 
 export interface FindingSemanticContextReport {
-  ancestry: ElementLocatorReport[];
-  identity: ElementIdentityReport;
-  computedStyle: ComputedStyleSubsetReport;
-  textLayout: TextLayoutReport | null;
-  visibility: VisibilityStateReport;
-  interactivity: InteractivityStateReport;
-  overlapHints: OverlapHintsReport;
+  computedStyle?: ComputedStyleSubsetReport;
+  textLayout?: TextLayoutReport;
+  captureClippedEdges?: CaptureEdge[];
 }
 
 export interface FindingContextReport {
   binding: FindingBindingReport;
-  semantic: FindingSemanticContextReport;
+  semantic?: FindingSemanticContextReport;
 }
-
-export type FindingEvidenceRefReport =
-  | {
-      type: "signal";
-      code: FindingSignalCode;
-    }
-  | {
-      type: "metric";
-      key: FindingMetricKey;
-    }
-  | {
-      type: "hotspot";
-      index: number;
-    }
-  | {
-      type: "artifact";
-      key: FindingArtifactKey;
-    };
 
 export interface SummaryActionReport {
   code: SummaryActionCode;
@@ -420,11 +375,8 @@ export interface FindingReport {
   issueTypes: IssueType[];
   likelyAffectedProperties: AffectedPropertyCode[];
   signals: FindingSignalReport[];
-  evidenceRefs: FindingEvidenceRefReport[];
-  hotspots: BoundingBox[];
-  actionTarget: ActionTargetReport | null;
-  element: FindingElementReport | null;
-  context: FindingContextReport | null;
+  element?: FindingElementReport;
+  context?: FindingContextReport;
 }
 
 export interface SeverityRollup {

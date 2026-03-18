@@ -38,7 +38,7 @@ export function rootCauseGroupIdForFinding(
     return "viewport-crop-risk";
   }
 
-  if (finding.code === "missing_or_extra_content" && finding.element !== null) {
+  if (finding.code === "missing_or_extra_content" && finding.element) {
     return "container-size-mismatch";
   }
 

@@ -68,12 +68,12 @@ Read these first:
 - `code` is the stable mismatch taxonomy
 - `rootCauseGroupId` groups related symptoms into a diagnostic blocker
 - `fixHint` provides the shortest actionable next step
-- `actionTarget` points to the likely DOM target in URL mode
 - `element` is the compact actionable anchor
-- `context` carries binding quality, semantic identity, preview-side computed styles, text layout, visibility, interactivity, and overlap hints
+- `context.semantic.computedStyle` keeps the most useful preview-side style data for implementation fixes
+- `context.binding` keeps only assignment method, confidence, and non-default fallback markers
+- `context.semantic.textLayout` is preserved only for text-related findings
+- `context.semantic.captureClippedEdges` is preserved only when selector capture framing looks clipped
 - `signals` adds stable heuristics such as text clipping, capture crop, or viewport mismatch
-- `evidenceRefs` points back to the specific signals, metrics, hotspots, and artifacts that support the finding
-- `hotspots` exposes the highest-value mismatch subregions
 
 ### `rollups`
 
@@ -110,7 +110,42 @@ Read these first:
       "code": "text_clipping",
       "severity": "medium",
       "fixHint": "Fix text overflow, line clamp, or available width.",
-      "rootCauseGroupId": "text-wrap-regression"
+      "rootCauseGroupId": "text-wrap-regression",
+      "element": {
+        "tag": "button",
+        "selector": "section#hero > button#cta",
+        "testId": "hero-cta",
+        "textSnippet": "Buy now"
+      },
+      "context": {
+        "binding": {
+          "assignmentMethod": "center-hit",
+          "assignmentConfidence": 0.91
+        },
+        "semantic": {
+          "computedStyle": {
+            "fontSize": "16px",
+            "lineHeight": "24px",
+            "fontWeight": "400",
+            "color": "rgb(255, 255, 255)",
+            "backgroundColor": "rgb(51, 51, 51)",
+            "borderRadius": "8px",
+            "gap": "normal",
+            "padding": "0px",
+            "width": "120px",
+            "height": "36px",
+            "margin": "0px"
+          },
+          "textLayout": {
+            "lineCount": 1,
+            "wrapState": "overflowing",
+            "hasEllipsis": true,
+            "lineClamp": "none",
+            "overflowsX": true,
+            "overflowsY": false
+          }
+        }
+      }
     }
   ],
   "error": null

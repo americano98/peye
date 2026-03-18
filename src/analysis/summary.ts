@@ -649,7 +649,7 @@ function canSafelyAutofix(params: {
 
   return referencedFindingIds.every((findingId) => {
     const finding = findingsById.get(findingId);
-    return Boolean(finding?.actionTarget?.selector);
+    return Boolean(finding?.element?.selector);
   });
 }
 
@@ -785,10 +785,8 @@ function mergeSignalCodes(
   return sortSignalCodes([...existing, ...signals.map((signal) => signal.code)]);
 }
 
-function selectorHintForFinding(
-  finding: Pick<FindingReport, "actionTarget" | "element">,
-): string | null {
-  return finding.actionTarget?.selector ?? finding.element?.selector ?? null;
+function selectorHintForFinding(finding: Pick<FindingReport, "element">): string | null {
+  return finding.element?.selector ?? null;
 }
 
 function sortSignalCodes(values: FindingSignalCode[]): FindingSignalCode[] {

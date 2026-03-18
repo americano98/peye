@@ -168,12 +168,14 @@ Use these fields for diagnosis:
 - `findings[].code`: stable mismatch taxonomy
 - `findings[].rootCauseGroupId`: diagnostic grouping for that specific finding
 - `findings[].fixHint`: short next-step hint
-- `findings[].actionTarget.selector`: the likely DOM target in URL mode
+- `findings[].bbox`: mismatch region bounds for geometry-aware reasoning
 - `findings[].element`: the compact actionable anchor
-- `findings[].context.binding`: assignment quality, selected candidate vs emitted anchor, fallback mode, and confidence
-- `findings[].context.semantic`: ancestry, `testId`, class summary, preview-side computed styles, text layout, visibility, interactivity, and overlap hints
+- `findings[].element.selector`: the main DOM target in URL mode
+- `findings[].context.binding`: assignment method, confidence, and non-default fallback mode
+- `findings[].context.semantic.computedStyle`: preview-side computed styles that are useful for implementation fixes
+- `findings[].context.semantic.textLayout`: text wrapping, overflow, ellipsis, and line-clamp hints when text is relevant
+- `findings[].context.semantic.captureClippedEdges`: selector-capture clipping hint when framing is suspect
 - `findings[].signals[].code`: stable automation hint
-- `findings[].evidenceRefs`: links back to the supporting signals, metrics, hotspots, and artifacts
 - `rollups.omittedFindings`: how many detailed findings were not emitted
 - `rollups.omittedBySeverity` and `rollups.omittedByKind`: whether the hidden tail is mostly low-noise or still meaningful
 - `rollups.topOmittedSelectors`: repeated DOM targets hidden by truncation
@@ -199,14 +201,14 @@ When using `peye` during implementation:
 4. If `summary.requiresRecapture` is `true`, fix setup or recapture before changing implementation code.
 5. If setup is sound, read `summary.decisionTrace[0]` to understand why the matrix chose the current verdict.
 6. Read `summary.primaryBlockers[0]` before changing code. Use it to decide whether the run is dominated by text wrapping, viewport/crop risk, container sizing, layout displacement, or style drift.
-7. For DOM findings, compare `findings[].context.binding.selectedCandidate` with `findings[].context.binding.anchorElement`:
-   - if they match, the binding is direct
-   - if they differ, the mismatch likely lives in an inline descendant but should still be fixed through the emitted anchor
-8. Use `findings[].context.binding.assignmentConfidence` and `fallbackMarker` to decide how aggressively to trust a DOM target. Low-confidence overlap or proxy bindings should push you to verify structure before patching code.
-9. If setup is sound and `summary.topActions[0]` points at a concrete DOM target, use that as the default next fix.
-10. If `findings` looks small but `rollups.omittedFindings > 0` or `rollups.tailAreaPercent` is still substantial, treat the issue as broader than the visible top-N details.
-11. Rerun `peye` into the same cleaned scratch directory.
-12. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
+7. Use `findings[].context.binding.assignmentConfidence` and `fallbackMarker` to decide how aggressively to trust a DOM target. Proxy bindings should push you to verify structure before patching code.
+8. Use `findings[].context.semantic.computedStyle` to inspect likely style drift without opening devtools first.
+9. Use `findings[].context.semantic.textLayout` when the issue looks text-related. Overflow, wrapping, ellipsis, or line-clamp mismatches usually map directly to CSS or container-width fixes.
+10. If `findings[].context.semantic.captureClippedEdges` is present, suspect selector framing or capture scope before changing implementation code.
+11. If setup is sound and the top finding exposes `element.selector`, use that as the default next fix target.
+12. If `findings` looks small but `rollups.omittedFindings > 0` or `rollups.tailAreaPercent` is still substantial, treat the issue as broader than the visible top-N details.
+13. Rerun `peye` into the same cleaned scratch directory.
+14. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
 
 Do not keep editing forever on a `needs_human_review` result unless the cause is clearly understood.
 

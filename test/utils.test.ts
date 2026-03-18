@@ -41,40 +41,34 @@ function createMetrics(
 }
 
 function createFinding(
-  overrides: Omit<Partial<FindingReport>, "actionTarget" | "element" | "context"> & {
-    actionTarget?: Partial<NonNullable<FindingReport["actionTarget"]>> | null;
+  overrides: Omit<Partial<FindingReport>, "element" | "context"> & {
     element?: Partial<NonNullable<FindingReport["element"]>> | null;
     context?: FindingReport["context"];
   } & Pick<FindingReport, "kind" | "severity">,
 ): FindingReport {
   const code = overrides.code ?? "rendering_mismatch";
   const signals = overrides.signals ?? [];
-  const element =
+  const element: NonNullable<FindingReport["element"]> | undefined =
     overrides.element === undefined || overrides.element === null
-      ? null
+      ? undefined
       : {
           tag: overrides.element.tag ?? "button",
           selector: overrides.element.selector ?? "#target",
-          role: overrides.element.role ?? null,
-          testId: overrides.element.testId ?? null,
-          textSnippet: overrides.element.textSnippet ?? null,
-          bbox: overrides.element.bbox ?? {
-            x: 0,
-            y: 0,
-            width: 20,
-            height: 20,
-          },
         };
-  const actionTarget =
-    overrides.actionTarget === undefined || overrides.actionTarget === null
-      ? null
-      : {
-          selector: overrides.actionTarget.selector ?? "#target",
-          tag: overrides.actionTarget.tag ?? "button",
-          role: overrides.actionTarget.role ?? null,
-          testId: overrides.actionTarget.testId ?? null,
-          textSnippet: overrides.actionTarget.textSnippet ?? null,
-        };
+
+  if (element) {
+    if (overrides.element?.role !== undefined && overrides.element.role !== null) {
+      element.role = overrides.element.role;
+    }
+
+    if (overrides.element?.testId !== undefined && overrides.element.testId !== null) {
+      element.testId = overrides.element.testId;
+    }
+
+    if (overrides.element?.textSnippet !== undefined && overrides.element.textSnippet !== null) {
+      element.textSnippet = overrides.element.textSnippet;
+    }
+  }
 
   return {
     id: overrides.id ?? "finding-test-001",
@@ -99,11 +93,8 @@ function createFinding(
     issueTypes: overrides.issueTypes ?? ["style"],
     likelyAffectedProperties: overrides.likelyAffectedProperties ?? ["style.typography"],
     signals,
-    evidenceRefs: overrides.evidenceRefs ?? [],
-    hotspots: overrides.hotspots ?? [],
-    actionTarget,
-    element,
-    context: overrides.context ?? null,
+    ...(element ? { element } : {}),
+    ...(overrides.context ? { context: overrides.context } : {}),
   };
 }
 
@@ -364,10 +355,9 @@ describe("decideRecommendation", () => {
               message: "Text is clipped.",
             },
           ],
-          actionTarget: {
+          element: {
             selector: "#cta",
             tag: "button",
-            role: null,
             textSnippet: "Buy",
           },
         }),
@@ -403,11 +393,9 @@ describe("decideRecommendation", () => {
               message: "Capture appears cropped.",
             },
           ],
-          actionTarget: {
+          element: {
             selector: "#hero",
             tag: "section",
-            role: null,
-            textSnippet: null,
           },
         }),
       ],
@@ -660,6 +648,16 @@ function createDomSnapshotForTest(
     ...elementOverrides,
   };
 
+  if (
+    element.captureClippedEdges.length > 0 &&
+    element.overlapHints.captureClippedEdges.length === 0
+  ) {
+    element.overlapHints = {
+      ...element.overlapHints,
+      captureClippedEdges: element.captureClippedEdges,
+    };
+  }
+
   return {
     root,
     elements: [element],
@@ -668,7 +666,7 @@ function createDomSnapshotForTest(
 }
 
 describe("buildFindingsAnalysis", () => {
-  test("keeps context null for visual-cluster findings", () => {
+  test("omits context for visual-cluster findings", () => {
     const analysis = buildFindingsAnalysis({
       analysisMode: "visual-clusters",
       rawRegions: [createRegion({ x: 12, y: 12, width: 6, height: 6, pixelCount: 36 })],
@@ -677,7 +675,7 @@ describe("buildFindingsAnalysis", () => {
       height: 80,
     });
 
-    expect(analysis.findings[0]?.context).toBeNull();
+    expect(analysis.findings[0]?.context).toBeUndefined();
   });
 
   test("keeps stable finding ids across runs and input reordering", () => {
@@ -768,14 +766,14 @@ describe("buildFindingsAnalysis", () => {
       "possible_capture_crop",
     ]);
     expect(analysis.findings[0]?.rootCauseGroupId).toBe("text-wrap-regression");
-    expect(analysis.findings[0]?.context?.semantic.textLayout).toEqual(
+    expect(analysis.findings[0]?.context?.semantic?.textLayout).toEqual(
       expect.objectContaining({
         lineCount: 1,
         wrapState: "single-line",
         hasEllipsis: false,
       }),
     );
-    expect(analysis.findings[0]?.context?.semantic.computedStyle.fontSize).toBe("16px");
+    expect(analysis.findings[0]?.context?.semantic?.captureClippedEdges).toEqual(["right"]);
   });
 
   test("emits center-hit binding diagnostics for strong anchor matches", () => {
@@ -790,12 +788,9 @@ describe("buildFindingsAnalysis", () => {
     expect(analysis.findings[0]?.context?.binding).toEqual(
       expect.objectContaining({
         assignmentMethod: "center-hit",
-        candidateCount: 1,
-        fallbackMarker: "none",
       }),
     );
-    expect(analysis.findings[0]?.context?.binding.selectedCandidate.tag).toBe("button");
-    expect(analysis.findings[0]?.context?.binding.anchorElement.tag).toBe("button");
+    expect(analysis.findings[0]?.context?.binding?.fallbackMarker).toBeUndefined();
   });
 
   test("emits ancestor-proxy diagnostics when an inline descendant wins the binding", () => {
@@ -859,8 +854,6 @@ describe("buildFindingsAnalysis", () => {
         fallbackMarker: "inline-proxy",
       }),
     );
-    expect(analysis.findings[0]?.context?.binding.selectedCandidate.tag).toBe("span");
-    expect(analysis.findings[0]?.context?.binding.anchorElement.tag).toBe("button");
   });
 
   test("emits weak overlap fallback diagnostics for low-confidence overlap matches", () => {
@@ -883,9 +876,7 @@ describe("buildFindingsAnalysis", () => {
     expect(analysis.findings[0]?.context?.binding).toEqual(
       expect.objectContaining({
         assignmentMethod: "overlap-best-fit",
-        candidateCount: 1,
         fallbackMarker: "weak-overlap",
-        overlapScore: 0.2,
       }),
     );
     expect(analysis.findings[0]?.context?.binding.assignmentConfidence).toBeLessThan(0.7);
@@ -909,10 +900,9 @@ describe("buildSummaryReport", () => {
             message: "Text is clipped.",
           },
         ],
-        actionTarget: {
+        element: {
           selector: "section#hero > button#cta",
           tag: "button",
-          role: null,
           textSnippet: "Buy",
         },
       }),
@@ -1022,10 +1012,9 @@ describe("buildSummaryReport", () => {
             message: "Capture appears cropped.",
           },
         ],
-        actionTarget: {
+        element: {
           selector: "section#hero > button#cta",
           tag: "button",
-          role: null,
           textSnippet: "Buy",
         },
       }),

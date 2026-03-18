@@ -115,7 +115,6 @@ describe("runCompare integration", () => {
       }),
     );
 
-    expect("reportVersion" in result.report).toBe(false);
     expect(result.report.analysisMode).toBe("visual-clusters");
     expect(result.report.summary.recommendation).toBe("pass");
     expect(result.report.summary.decisionTrace.map((trace) => trace.code)).toEqual([
@@ -176,8 +175,8 @@ describe("runCompare integration", () => {
     expect(result.report.metrics.mismatchPercent).toBeLessThanOrEqual(1.5);
     expect(result.report.findings).toHaveLength(1);
     expect(result.report.findings[0]?.source).toBe("visual-cluster");
-    expect(result.report.findings[0]?.element).toBeNull();
-    expect(Array.isArray(result.report.findings[0]?.hotspots)).toBe(true);
+    expect(result.report.findings[0]?.element).toBeUndefined();
+    expect(result.report.findings[0]?.context).toBeUndefined();
   });
 
   test("groups selector capture mismatches by DOM element", async () => {
@@ -263,31 +262,30 @@ describe("runCompare integration", () => {
       ]);
       expect(result.report.findings.every((finding) => finding.code.length > 0)).toBe(true);
       expect(
-        result.report.findings.every((finding) =>
-          finding.evidenceRefs.slice(-2).every((ref) => ref.type === "artifact"),
-        ),
-      ).toBe(true);
-      expect(
         result.report.findings.every(
-          (finding) => finding.actionTarget?.selector === finding.element?.selector,
+          (finding) =>
+            !("actionTarget" in finding) &&
+            !("evidenceRefs" in finding) &&
+            !("hotspots" in finding),
         ),
       ).toBe(true);
       expect(result.report.rollups.byTag).toEqual([
         { tag: "button", count: 1 },
         { tag: "h1", count: 1 },
       ]);
-      expect(result.report.findings[0]?.element?.bbox.x).toBeLessThan(240);
-      expect(result.report.findings[0]?.element?.bbox.y).toBeLessThan(140);
       const buttonFinding = result.report.findings.find(
         (finding) => finding.element?.tag === "button",
       );
       expect(buttonFinding?.element?.testId).toBe("hero-cta");
-      expect(buttonFinding?.actionTarget?.testId).toBe("hero-cta");
       expect(buttonFinding?.context?.binding.assignmentMethod).toBe("center-hit");
-      expect(buttonFinding?.context?.binding.selectedCandidate.tag).toBe("button");
-      expect(buttonFinding?.context?.semantic.ancestry[0]?.tag).toBe("section");
-      expect(buttonFinding?.context?.semantic.identity.classSummary).toEqual(["cta", "primary"]);
-      expect(buttonFinding?.context?.semantic.computedStyle.borderRadius).toBe("8px");
+      expect(buttonFinding?.context?.binding.fallbackMarker).toBeUndefined();
+      expect(buttonFinding?.context?.semantic?.computedStyle?.borderRadius).toBe("8px");
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "single-line",
+        }),
+      );
       expect(result.report.images).toEqual({
         preview: { width: 240, height: 140 },
         reference: { width: 240, height: 140 },
@@ -579,15 +577,21 @@ describe("runCompare integration", () => {
         "text.lineClamp",
         "size.width",
       ]);
-      expect(buttonFinding?.actionTarget).toEqual({
+      expect(buttonFinding?.element).toEqual({
         selector: "section#hero > button#cta",
         tag: "button",
-        role: null,
         testId: "hero-cta",
         textSnippet: "Very long button label",
       });
       expect(buttonFinding?.element?.testId).toBe("hero-cta");
-      expect(buttonFinding?.context?.semantic.textLayout).toEqual(
+      expect(buttonFinding?.context?.semantic?.computedStyle).toEqual(
+        expect.objectContaining({
+          fontSize: "16px",
+          lineHeight: "24px",
+          fontWeight: "400",
+        }),
+      );
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
         expect.objectContaining({
           lineCount: 1,
           wrapState: "overflowing",
@@ -596,19 +600,6 @@ describe("runCompare integration", () => {
           overflowsX: true,
         }),
       );
-      expect(buttonFinding?.context?.semantic.computedStyle).toEqual(
-        expect.objectContaining({
-          fontSize: "16px",
-          lineHeight: "24px",
-          fontWeight: "400",
-        }),
-      );
-      expect(buttonFinding?.evidenceRefs).toEqual([
-        { type: "signal", code: "probable_text_clipping" },
-        { type: "metric", key: "mismatchPercent" },
-        { type: "artifact", key: "heatmap" },
-        { type: "artifact", key: "diff" },
-      ]);
       expect(buttonFinding?.signals).toContainEqual({
         code: "probable_text_clipping",
         confidence: "medium",
@@ -697,30 +688,111 @@ describe("runCompare integration", () => {
         "capture.selectorScope",
         "capture.viewport",
       ]);
-      expect(buttonFinding?.actionTarget).toEqual({
-        selector: "section#hero > button#cta",
-        tag: "button",
-        role: null,
-        testId: null,
-        textSnippet: "Buy now",
-      });
-      expect(buttonFinding?.evidenceRefs).toEqual([
-        { type: "signal", code: "possible_capture_crop" },
-        { type: "metric", key: "mismatchPercent" },
-        { type: "artifact", key: "heatmap" },
-        { type: "artifact", key: "diff" },
-      ]);
+      expect(buttonFinding?.element?.selector).toBe("section#hero > button#cta");
+      expect(buttonFinding?.element?.textSnippet).toBe("Buy now");
       expect(buttonFinding?.signals).toContainEqual({
         code: "possible_capture_crop",
         confidence: "high",
         message:
           "Element bounds were clipped by the preview capture on the right edge(s); check selector scope and capture framing.",
       });
-      expect(buttonFinding?.context?.semantic.overlapHints.captureClippedEdges).toEqual(["right"]);
+      expect(buttonFinding?.context?.semantic?.captureClippedEdges).toEqual(["right"]);
       expect(result.report.summary.topActions[0]?.code).toBe("recapture_with_broader_scope");
       expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
       expect(result.report.summary.safeToAutofix).toBe(false);
       expect(result.report.summary.requiresRecapture).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("falls back to a visual-cluster dimension finding when selector capture misses a thin edge strip", async () => {
+    const dir = await createTempDir("peye-selector-edge-strip");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 69,
+      body: `
+        <rect width="120" height="69" fill="#ffffff" />
+        <rect x="20" y="18" width="80" height="24" rx="4" fill="#0b84ff" />
+      `,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 120px; height: 60px; background: #ffffff; }
+                #hero button {
+                  position: absolute;
+                  left: 20px;
+                  top: 18px;
+                  width: 80px;
+                  height: 24px;
+                  border: 0;
+                  border-radius: 4px;
+                  background: #0b84ff;
+                  color: transparent;
+                  font-size: 0;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button id="cta">Buy</button>
+              </section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+
+      expect(result.report.analysisMode).toBe("dom-elements");
+      expect(result.report.error).toBeNull();
+      expect(result.exitCode).toBe(3);
+      expect(result.report.summary.recommendation).toBe("needs_human_review");
+      expect(result.report.summary.requiresRecapture).toBe(true);
+      expect(result.report.findings).toHaveLength(1);
+      expect(result.report.findings[0]?.source).toBe("visual-cluster");
+      expect(result.report.findings[0]?.kind).toBe("dimension");
+      expect(result.report.findings[0]?.code).toBe("viewport_mismatch");
+      expect(result.report.findings[0]?.signals).toContainEqual({
+        code: "possible_viewport_mismatch",
+        confidence: "medium",
+        message:
+          "Dimension mismatch reaches the right, bottom, and left edge(s) of the comparison canvas; verify viewport, selected frame, and capture target.",
+      });
+      expect(result.report.summary.topActions[0]?.code).toBe("verify_viewport_or_reference");
+      expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
+      expect(result.report.images).toEqual({
+        preview: { width: 120, height: 60 },
+        reference: { width: 120, height: 69 },
+        canvas: { width: 120, height: 69 },
+      });
+      expect(result.report.artifacts.overlay).toContain("overlay.png");
+      expect(result.report.artifacts.diff).toContain("diff.png");
+      expect(result.report.artifacts.heatmap).toContain("heatmap.png");
     } finally {
       await server.close();
     }
@@ -875,11 +947,12 @@ describe("runCompare integration", () => {
       expect(buttonFinding?.element?.testId).toBe("hero-cta");
       expect(buttonFinding?.context?.binding.assignmentMethod).toBe("ancestor-proxy");
       expect(buttonFinding?.context?.binding.fallbackMarker).toBe("inline-proxy");
-      expect(buttonFinding?.context?.binding.selectedCandidate.tag).toBe("span");
-      expect(buttonFinding?.context?.binding.selectedCandidate.testId).toBe("hero-label");
-      expect(buttonFinding?.context?.binding.anchorElement.testId).toBe("hero-cta");
-      expect(buttonFinding?.context?.semantic.overlapHints.topMostAtCenter).toContain(".overlay");
-      expect(buttonFinding?.context?.semantic.overlapHints.occludingSelector).toContain(".overlay");
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "single-line",
+        }),
+      );
     } finally {
       await server.close();
     }
@@ -950,10 +1023,12 @@ describe("runCompare integration", () => {
       );
 
       expect(buttonFinding).toBeDefined();
-      expect(buttonFinding?.context?.semantic.visibility.isVisible).toBe(true);
-      expect(buttonFinding?.context?.semantic.visibility.pointerEvents).toBe("none");
-      expect(buttonFinding?.context?.semantic.interactivity.isInteractive).toBe(false);
-      expect(buttonFinding?.context?.semantic.interactivity.cursor).toBe("pointer");
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "single-line",
+        }),
+      );
     } finally {
       await server.close();
     }
@@ -1020,9 +1095,8 @@ describe("runCompare integration", () => {
       expect(result.report.error).toBeNull();
       expect(rootFinding).toBeDefined();
       expect(rootFinding?.element?.tag).toBe("section");
-      expect(rootFinding?.actionTarget?.selector).toBe("section#hero");
       expect(rootFinding?.context?.binding.assignmentMethod).toBe("center-hit");
-      expect(rootFinding?.context?.binding.anchorElement.selector).toBe("section#hero");
+      expect(rootFinding?.element?.selector).toBe("section#hero");
     } finally {
       await server.close();
     }
@@ -1107,8 +1181,8 @@ describe("runCompare integration", () => {
       result.report.summary.decisionTrace.some((trace) => trace.axis === "setup_capture_risk"),
     ).toBe(false);
     expect(result.report.findings.length).toBeGreaterThan(0);
-    expect(result.report.findings[0]?.element).toBeNull();
-    expect(Array.isArray(result.report.findings[0]?.hotspots)).toBe(true);
+    expect(result.report.findings[0]?.element).toBeUndefined();
+    expect(result.report.findings[0]?.context).toBeUndefined();
   });
 
   test("returns retry_fix for a localized color mismatch without setup-risk traces", async () => {
@@ -1240,14 +1314,8 @@ describe("runCompare integration", () => {
       "capture.viewport",
       "reference.frame",
     ]);
-    expect(result.report.findings[0]?.actionTarget).toBeNull();
+    expect(result.report.findings[0]?.element).toBeUndefined();
     expect(result.report.findings[0]?.issueTypes).toEqual(["missing_or_extra", "size"]);
-    expect(result.report.findings[0]?.evidenceRefs).toEqual([
-      { type: "signal", code: "possible_viewport_mismatch" },
-      { type: "metric", key: "dimensionMismatch" },
-      { type: "artifact", key: "heatmap" },
-      { type: "artifact", key: "diff" },
-    ]);
     expect(result.report.findings[0]?.signals).toContainEqual({
       code: "possible_viewport_mismatch",
       confidence: "medium",

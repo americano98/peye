@@ -191,7 +191,6 @@ describe("built CLI integration", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).not.toContain("recommendation:");
     expect(result.stdout).not.toContain("decisionRule:");
-    expect("reportVersion" in stdoutReport).toBe(false);
     expect(stdoutReport.summary.recommendation).toBe("pass");
     expect(stdoutReport.error).toBeNull();
     expect(stdoutReport).toEqual(writtenReport);
