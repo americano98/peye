@@ -5,11 +5,73 @@ export const FINDING_SIGNAL_CODES = [
   "possible_capture_crop",
   "possible_viewport_mismatch",
 ] as const;
+export const FINDING_CODES = [
+  "text_clipping",
+  "capture_crop",
+  "viewport_mismatch",
+  "missing_or_extra_content",
+  "layout_mismatch",
+  "style_mismatch",
+  "rendering_mismatch",
+  "layout_style_mismatch",
+] as const;
+export const SUMMARY_ACTION_CODES = [
+  "fix_text_overflow",
+  "fix_layout_styles",
+  "fix_visual_styles",
+  "verify_missing_or_extra_content",
+  "recapture_with_broader_scope",
+  "verify_viewport_or_reference",
+  "fix_preview_setup",
+  "fix_reference_setup",
+] as const;
+export const ROOT_CAUSE_CODES = [
+  "text_overflow",
+  "capture_scope_too_tight",
+  "viewport_or_reference_mismatch",
+  "missing_or_extra_content",
+  "layout_displacement",
+  "visual_style_drift",
+  "rendering_drift",
+  "preview_input_or_runtime_error",
+  "reference_input_or_acquisition_error",
+] as const;
+export const AFFECTED_PROPERTY_CODES = [
+  "layout.position",
+  "layout.spacing",
+  "layout.alignment",
+  "size.width",
+  "size.height",
+  "style.color",
+  "style.background",
+  "style.border",
+  "style.radius",
+  "style.shadow",
+  "style.typography",
+  "text.overflow",
+  "text.lineClamp",
+  "capture.selectorScope",
+  "capture.viewport",
+  "reference.frame",
+] as const;
+export const FINDING_METRIC_KEYS = [
+  "mismatchPercent",
+  "structuralMismatchPercent",
+  "dimensionMismatch",
+  "meanColorDelta",
+] as const;
+export const FINDING_ARTIFACT_KEYS = ["heatmap", "diff"] as const;
 export const SIGNAL_CONFIDENCES = ["low", "medium", "high"] as const;
 
 export type CompareMode = (typeof COMPARE_MODES)[number];
 export type AnalysisMode = (typeof ANALYSIS_MODES)[number];
 export type FindingSignalCode = (typeof FINDING_SIGNAL_CODES)[number];
+export type FindingCode = (typeof FINDING_CODES)[number];
+export type SummaryActionCode = (typeof SUMMARY_ACTION_CODES)[number];
+export type RootCauseCode = (typeof ROOT_CAUSE_CODES)[number];
+export type AffectedPropertyCode = (typeof AFFECTED_PROPERTY_CODES)[number];
+export type FindingMetricKey = (typeof FINDING_METRIC_KEYS)[number];
+export type FindingArtifactKey = (typeof FINDING_ARTIFACT_KEYS)[number];
 export type SignalConfidence = (typeof SIGNAL_CONFIDENCES)[number];
 
 export type Recommendation =
@@ -103,6 +165,11 @@ export interface SummaryReport {
   recommendation: Recommendation;
   severity: Severity;
   reason: string;
+  topActions: SummaryActionReport[];
+  rootCauseCandidates: SummaryRootCauseReport[];
+  overallConfidence: number;
+  safeToAutofix: boolean;
+  requiresRecapture: boolean;
 }
 
 export interface ErrorReport {
@@ -125,19 +192,65 @@ export interface FindingSignalReport {
   message: string;
 }
 
+export interface ActionTargetReport {
+  selector: string;
+  tag: string;
+  role: string | null;
+  textSnippet: string | null;
+}
+
+export type FindingEvidenceRefReport =
+  | {
+      type: "signal";
+      code: FindingSignalCode;
+    }
+  | {
+      type: "metric";
+      key: FindingMetricKey;
+    }
+  | {
+      type: "hotspot";
+      index: number;
+    }
+  | {
+      type: "artifact";
+      key: FindingArtifactKey;
+    };
+
+export interface SummaryActionReport {
+  code: SummaryActionCode;
+  confidence: number;
+  reason: string;
+  findingIds: string[];
+}
+
+export interface SummaryRootCauseReport {
+  code: RootCauseCode;
+  confidence: number;
+  reason: string;
+  findingIds: string[];
+  signalCodes: FindingSignalCode[];
+}
+
 export interface FindingReport {
   id: string;
   source: FindingSource;
   kind: RegionKind;
+  code: FindingCode;
   severity: Severity;
+  confidence: number;
   summary: string;
+  fixHint: string;
   bbox: BoundingBox;
   regionCount: number;
   mismatchPixels: number;
   mismatchPercentOfCanvas: number;
   issueTypes: IssueType[];
+  likelyAffectedProperties: AffectedPropertyCode[];
   signals: FindingSignalReport[];
+  evidenceRefs: FindingEvidenceRefReport[];
   hotspots: BoundingBox[];
+  actionTarget: ActionTargetReport | null;
   element: FindingElementReport | null;
 }
 

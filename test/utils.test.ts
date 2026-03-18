@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { decideRecommendation } from "../src/analysis/recommendation.js";
+import { buildSummaryReport } from "../src/analysis/summary.js";
 import { parseReferenceInput } from "../src/io/inputs.js";
 import type { FindingReport, MetricsReport } from "../src/types/report.js";
 import { parseViewport } from "../src/utils/viewport.js";
@@ -34,8 +35,11 @@ function createFinding(
     id: overrides.id ?? "finding-001",
     source: overrides.source ?? "visual-cluster",
     kind: overrides.kind,
+    code: overrides.code ?? "rendering_mismatch",
     severity: overrides.severity,
+    confidence: overrides.confidence ?? 0.5,
     summary: overrides.summary ?? "Finding summary",
+    fixHint: overrides.fixHint ?? "Fix hint",
     bbox: overrides.bbox ?? {
       x: 0,
       y: 0,
@@ -46,8 +50,11 @@ function createFinding(
     mismatchPixels: overrides.mismatchPixels ?? 20,
     mismatchPercentOfCanvas: overrides.mismatchPercentOfCanvas ?? 0.2,
     issueTypes: overrides.issueTypes ?? ["style"],
+    likelyAffectedProperties: overrides.likelyAffectedProperties ?? ["style.typography"],
     signals: overrides.signals ?? [],
+    evidenceRefs: overrides.evidenceRefs ?? [],
     hotspots: overrides.hotspots ?? [],
+    actionTarget: overrides.actionTarget ?? null,
     element: overrides.element ?? null,
   };
 }
@@ -177,5 +184,186 @@ describe("decideRecommendation", () => {
     });
 
     expect(decision.recommendation).toBe("needs_human_review");
+  });
+});
+
+describe("buildSummaryReport", () => {
+  test("derives an autofixable text overflow action from DOM findings", () => {
+    const summary = buildSummaryReport({
+      baseDecision: {
+        recommendation: "retry_fix",
+        severity: "medium",
+        reason: "Localized issues were detected.",
+      },
+      findings: [
+        createFinding({
+          kind: "pixel",
+          severity: "medium",
+          code: "text_clipping",
+          confidence: 0.8,
+          signals: [
+            {
+              code: "probable_text_clipping",
+              confidence: "medium",
+              message: "Text is clipped.",
+            },
+          ],
+          actionTarget: {
+            selector: "section#hero > button#cta",
+            tag: "button",
+            role: null,
+            textSnippet: "Buy",
+          },
+        }),
+      ],
+      analysisMode: "dom-elements",
+      omittedFindings: 0,
+      error: null,
+    });
+
+    expect(summary.rootCauseCandidates[0]?.code).toBe("text_overflow");
+    expect(summary.topActions[0]?.code).toBe("fix_text_overflow");
+    expect(summary.topActions[0]?.findingIds).toEqual(["finding-001"]);
+    expect(summary.safeToAutofix).toBe(true);
+    expect(summary.requiresRecapture).toBe(false);
+    expect(summary.overallConfidence).toBe(0.8);
+  });
+
+  test("keeps root causes and actions in stable order when mixed findings map to multiple causes", () => {
+    const summary = buildSummaryReport({
+      baseDecision: {
+        recommendation: "retry_fix",
+        severity: "high",
+        reason: "Mixed layout and style issues were detected.",
+      },
+      findings: [
+        createFinding({
+          id: "finding-001",
+          kind: "mixed",
+          severity: "high",
+          code: "layout_style_mismatch",
+          confidence: 0.77,
+        }),
+        createFinding({
+          id: "finding-002",
+          kind: "color",
+          severity: "medium",
+          code: "style_mismatch",
+          confidence: 0.77,
+        }),
+      ],
+      analysisMode: "dom-elements",
+      omittedFindings: 0,
+      error: null,
+    });
+
+    expect(summary.rootCauseCandidates.map((candidate) => candidate.code)).toEqual([
+      "layout_displacement",
+      "visual_style_drift",
+    ]);
+    expect(summary.topActions.map((action) => action.code)).toEqual([
+      "fix_layout_styles",
+      "fix_visual_styles",
+    ]);
+    expect(summary.topActions[1]?.findingIds).toEqual(["finding-001", "finding-002"]);
+  });
+
+  test("keeps signal-derived root causes even when finding code comes from another signal or kind", () => {
+    const summary = buildSummaryReport({
+      baseDecision: {
+        recommendation: "retry_fix",
+        severity: "high",
+        reason: "Setup or rendering issues were detected.",
+      },
+      findings: [
+        createFinding({
+          kind: "mixed",
+          severity: "high",
+          code: "text_clipping",
+          confidence: 0.9,
+          signals: [
+            {
+              code: "probable_text_clipping",
+              confidence: "high",
+              message: "Text is clipped.",
+            },
+            {
+              code: "possible_capture_crop",
+              confidence: "high",
+              message: "Capture appears cropped.",
+            },
+          ],
+          actionTarget: {
+            selector: "section#hero > button#cta",
+            tag: "button",
+            role: null,
+            textSnippet: "Buy",
+          },
+        }),
+      ],
+      analysisMode: "dom-elements",
+      omittedFindings: 0,
+      error: null,
+    });
+
+    expect(summary.rootCauseCandidates.map((candidate) => candidate.code)).toEqual([
+      "capture_scope_too_tight",
+      "text_overflow",
+    ]);
+    expect(summary.topActions.map((action) => action.code)).toEqual([
+      "fix_text_overflow",
+      "recapture_with_broader_scope",
+    ]);
+    expect(summary.safeToAutofix).toBe(false);
+    expect(summary.requiresRecapture).toBe(true);
+  });
+
+  test("marks reference acquisition failures as requiring recapture/setup fixes", () => {
+    const summary = buildSummaryReport({
+      baseDecision: {
+        recommendation: "needs_human_review",
+        severity: "high",
+        reason: "Figma did not return an image URL.",
+      },
+      findings: [],
+      analysisMode: "visual-clusters",
+      omittedFindings: 0,
+      error: {
+        code: "figma_image_missing",
+        message: "Figma did not return an image URL.",
+        exitCode: 3,
+      },
+      failureOrigin: "reference",
+    });
+
+    expect(summary.rootCauseCandidates[0]?.code).toBe("reference_input_or_acquisition_error");
+    expect(summary.topActions[0]?.code).toBe("fix_reference_setup");
+    expect(summary.safeToAutofix).toBe(false);
+    expect(summary.requiresRecapture).toBe(true);
+    expect(summary.overallConfidence).toBe(0.95);
+  });
+
+  test("reduces overall confidence for visual-cluster findings when findings are omitted", () => {
+    const summary = buildSummaryReport({
+      baseDecision: {
+        recommendation: "retry_fix",
+        severity: "medium",
+        reason: "Clustered issues were detected.",
+      },
+      findings: [
+        createFinding({
+          kind: "pixel",
+          severity: "medium",
+          code: "rendering_mismatch",
+          confidence: 0.6,
+        }),
+      ],
+      analysisMode: "visual-clusters",
+      omittedFindings: 4,
+      error: null,
+    });
+
+    expect(summary.topActions[0]?.code).toBe("fix_visual_styles");
+    expect(summary.overallConfidence).toBe(0.45);
   });
 });

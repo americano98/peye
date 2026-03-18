@@ -117,6 +117,11 @@ describe("runCompare integration", () => {
     expect("reportVersion" in result.report).toBe(false);
     expect(result.report.analysisMode).toBe("visual-clusters");
     expect(result.report.summary.recommendation).toBe("pass");
+    expect(result.report.summary.topActions).toEqual([]);
+    expect(result.report.summary.rootCauseCandidates).toEqual([]);
+    expect(result.report.summary.overallConfidence).toBe(0.99);
+    expect(result.report.summary.safeToAutofix).toBe(false);
+    expect(result.report.summary.requiresRecapture).toBe(false);
     expect(result.exitCode).toBe(0);
     expect(result.report.images).toEqual({
       preview: { width: 100, height: 100 },
@@ -251,6 +256,17 @@ describe("runCompare integration", () => {
         "h1",
         "button",
       ]);
+      expect(result.report.findings.every((finding) => finding.code.length > 0)).toBe(true);
+      expect(
+        result.report.findings.every((finding) =>
+          finding.evidenceRefs.slice(-2).every((ref) => ref.type === "artifact"),
+        ),
+      ).toBe(true);
+      expect(
+        result.report.findings.every(
+          (finding) => finding.actionTarget?.selector === finding.element?.selector,
+        ),
+      ).toBe(true);
       expect(result.report.rollups.byTag).toEqual([
         { tag: "button", count: 1 },
         { tag: "h1", count: 1 },
@@ -526,12 +542,36 @@ describe("runCompare integration", () => {
       );
 
       expect(buttonFinding).toBeDefined();
+      expect(buttonFinding?.code).toBe("text_clipping");
+      expect(buttonFinding?.fixHint).toContain("overflow");
+      expect(buttonFinding?.confidence).toBeGreaterThanOrEqual(0.8);
+      expect(buttonFinding?.likelyAffectedProperties).toEqual([
+        "text.overflow",
+        "text.lineClamp",
+        "size.width",
+      ]);
+      expect(buttonFinding?.actionTarget).toEqual({
+        selector: "section#hero > button#cta",
+        tag: "button",
+        role: null,
+        textSnippet: "Very long button label",
+      });
+      expect(buttonFinding?.evidenceRefs).toEqual([
+        { type: "signal", code: "probable_text_clipping" },
+        { type: "metric", key: "mismatchPercent" },
+        { type: "artifact", key: "heatmap" },
+        { type: "artifact", key: "diff" },
+      ]);
       expect(buttonFinding?.signals).toContainEqual({
         code: "probable_text_clipping",
         confidence: "medium",
         message:
           "Text content likely overflows the element bounds and is being clipped on the horizontal axis.",
       });
+      expect(result.report.summary.topActions[0]?.code).toBe("fix_text_overflow");
+      expect(result.report.summary.rootCauseCandidates[0]?.code).toBe("text_overflow");
+      expect(result.report.summary.safeToAutofix).toBe(false);
+      expect(result.report.summary.requiresRecapture).toBe(false);
     } finally {
       await server.close();
     }
@@ -601,12 +641,34 @@ describe("runCompare integration", () => {
       );
 
       expect(buttonFinding).toBeDefined();
+      expect(buttonFinding?.code).toBe("capture_crop");
+      expect(buttonFinding?.fixHint).toContain("Recapture");
+      expect(buttonFinding?.likelyAffectedProperties).toEqual([
+        "capture.selectorScope",
+        "capture.viewport",
+      ]);
+      expect(buttonFinding?.actionTarget).toEqual({
+        selector: "section#hero > button#cta",
+        tag: "button",
+        role: null,
+        textSnippet: "Buy now",
+      });
+      expect(buttonFinding?.evidenceRefs).toEqual([
+        { type: "signal", code: "possible_capture_crop" },
+        { type: "metric", key: "mismatchPercent" },
+        { type: "artifact", key: "heatmap" },
+        { type: "artifact", key: "diff" },
+      ]);
       expect(buttonFinding?.signals).toContainEqual({
         code: "possible_capture_crop",
         confidence: "high",
         message:
           "Element bounds were clipped by the preview capture on the right edge(s); check selector scope and capture framing.",
       });
+      expect(result.report.summary.topActions[0]?.code).toBe("recapture_with_broader_scope");
+      expect(result.report.summary.rootCauseCandidates[0]?.code).toBe("capture_scope_too_tight");
+      expect(result.report.summary.safeToAutofix).toBe(false);
+      expect(result.report.summary.requiresRecapture).toBe(true);
     } finally {
       await server.close();
     }
@@ -661,6 +723,10 @@ describe("runCompare integration", () => {
       expect(report.error?.code).toBe("preview_selector_capture_failed");
       expect(report.error?.message).toContain("Preview selector could not be captured: #missing.");
       expect(report.error?.exitCode).toBe(3);
+      expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
+      expect(report.summary.rootCauseCandidates[0]?.code).toBe("preview_input_or_runtime_error");
+      expect(report.summary.safeToAutofix).toBe(false);
+      expect(report.summary.requiresRecapture).toBe(true);
       expect(report.images).toEqual({
         preview: null,
         reference: null,
@@ -781,8 +847,27 @@ describe("runCompare integration", () => {
     expect(result.report.summary.recommendation).toBe("needs_human_review");
     expect(result.exitCode).toBe(3);
     expect(result.report.findings).toHaveLength(1);
+    expect(result.report.summary.topActions[0]?.code).toBe("verify_viewport_or_reference");
+    expect(result.report.summary.rootCauseCandidates[0]?.code).toBe(
+      "viewport_or_reference_mismatch",
+    );
+    expect(result.report.summary.safeToAutofix).toBe(false);
+    expect(result.report.summary.requiresRecapture).toBe(true);
     expect(result.report.findings[0]?.kind).toBe("dimension");
+    expect(result.report.findings[0]?.code).toBe("viewport_mismatch");
+    expect(result.report.findings[0]?.fixHint).toContain("Verify viewport");
+    expect(result.report.findings[0]?.likelyAffectedProperties).toEqual([
+      "capture.viewport",
+      "reference.frame",
+    ]);
+    expect(result.report.findings[0]?.actionTarget).toBeNull();
     expect(result.report.findings[0]?.issueTypes).toEqual(["missing_or_extra", "size"]);
+    expect(result.report.findings[0]?.evidenceRefs).toEqual([
+      { type: "signal", code: "possible_viewport_mismatch" },
+      { type: "metric", key: "dimensionMismatch" },
+      { type: "artifact", key: "heatmap" },
+      { type: "artifact", key: "diff" },
+    ]);
     expect(result.report.findings[0]?.signals).toContainEqual({
       code: "possible_viewport_mismatch",
       confidence: "medium",
@@ -836,8 +921,8 @@ describe("runCompare integration", () => {
     expect(result.report.analysisMode).toBe("visual-clusters");
     expect(result.report.rollups.rawRegionCount).toBe(100);
     expect(result.report.metrics.findingsCount).toBe(100);
-    expect(result.report.findings).toHaveLength(25);
-    expect(result.report.rollups.omittedFindings).toBe(75);
+    expect(result.report.findings).toHaveLength(20);
+    expect(result.report.rollups.omittedFindings).toBe(80);
     expect(reportBuffer.byteLength).toBeLessThan(32_000);
   });
 
@@ -1000,6 +1085,12 @@ describe("runCompare integration", () => {
       expect(result.exitCode).toBe(3);
       expect(result.report.summary.recommendation).toBe("needs_human_review");
       expect(result.report.analysisMode).toBe("visual-clusters");
+      expect(report.summary.topActions[0]?.code).toBe("fix_reference_setup");
+      expect(report.summary.rootCauseCandidates[0]?.code).toBe(
+        "reference_input_or_acquisition_error",
+      );
+      expect(report.summary.safeToAutofix).toBe(false);
+      expect(report.summary.requiresRecapture).toBe(true);
       expect(report.error).toEqual({
         code: "figma_image_missing",
         message: "Figma did not return an image URL for node 1:2.",
@@ -1408,6 +1499,10 @@ describe("runCompare integration", () => {
 
     expect(result.exitCode).toBe(1);
     expect(report.summary.recommendation).toBe("needs_human_review");
+    expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
+    expect(report.summary.rootCauseCandidates[0]?.code).toBe("preview_input_or_runtime_error");
+    expect(report.summary.safeToAutofix).toBe(false);
+    expect(report.summary.requiresRecapture).toBe(true);
     expect(report.error).toEqual({
       code: "preview_viewport_required",
       message: "Preview URL requires --viewport so the browser screenshot is deterministic.",
@@ -1451,6 +1546,10 @@ describe("runCompare integration", () => {
     const report = await readReport(result.report.artifacts.report);
 
     expect(result.exitCode).toBe(1);
+    expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
+    expect(report.summary.rootCauseCandidates[0]?.code).toBe("preview_input_or_runtime_error");
+    expect(report.summary.safeToAutofix).toBe(false);
+    expect(report.summary.requiresRecapture).toBe(true);
     expect(report.error).toEqual({
       code: "preview_ignore_selector_empty",
       message: "--ignore-selector must not be empty.",

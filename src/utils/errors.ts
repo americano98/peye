@@ -46,9 +46,7 @@ export function ensureError(error: unknown): Error {
 }
 
 export function createFailureReport(params: {
-  reason: string;
-  recommendation: Recommendation;
-  severity: Severity;
+  summary: CompareReport["summary"];
   preview: CompareReport["inputs"]["preview"];
   reference: CompareReport["inputs"]["reference"];
   viewport: CompareReport["inputs"]["viewport"];
@@ -79,11 +77,7 @@ export function createFailureReport(params: {
 
   return {
     analysisMode: params.analysisMode,
-    summary: {
-      recommendation: params.recommendation,
-      severity: params.severity,
-      reason: params.reason,
-    },
+    summary: params.summary,
     inputs: {
       preview: params.preview,
       reference: params.reference,

@@ -13,10 +13,15 @@ import type {
   CaptureEdge,
 } from "../types/internal.js";
 import type {
+  ActionTargetReport,
+  AffectedPropertyCode,
   AnalysisMode,
   BoundingBox,
+  FindingCode,
   FindingElementReport,
+  FindingEvidenceRefReport,
   FindingReport,
+  FindingMetricKey,
   FindingSignalReport,
   FindingSource,
   IssueType,
@@ -33,15 +38,21 @@ import { compareSeverityDescending, maxSeverity } from "../utils/severity.js";
 interface DraftFinding {
   source: FindingSource;
   kind: RegionKind;
+  code: FindingCode;
   severity: Severity;
+  confidence: number;
   summary: string;
+  fixHint: string;
   bbox: BoundingBox;
   regionCount: number;
   mismatchPixels: number;
   mismatchPercentOfCanvas: number;
   issueTypes: IssueType[];
+  likelyAffectedProperties: AffectedPropertyCode[];
   signals: FindingSignalReport[];
+  evidenceRefs: FindingEvidenceRefReport[];
   hotspots: BoundingBox[];
+  actionTarget: ActionTargetReport | null;
   element: FindingElementReport | null;
 }
 
@@ -229,13 +240,31 @@ function buildDraftFinding(params: {
   const mismatchPixels = params.regions.reduce((sum, region) => sum + region.pixelCount, 0);
   const kind = aggregateKind(params.regions);
   const elementReport = params.element ? toElementReport(params.element) : null;
+  const actionTarget = params.element ? toActionTargetReport(params.element) : null;
   const primaryBox = elementReport?.bbox ?? bbox;
+  const signals = buildFindingSignals({
+    kind,
+    bbox,
+    element: params.element,
+    canvasWidth: params.canvasWidth,
+    canvasHeight: params.canvasHeight,
+  });
+  const code = buildFindingCode(kind, signals);
+  const hotspots = buildHotspotBoxes(params.regions, primaryBox);
 
   return {
     source: params.source,
     kind,
+    code,
     severity: maxSeverity(params.regions.map((region) => region.severity)),
+    confidence: buildFindingConfidence({
+      source: params.source,
+      kind,
+      signals,
+      actionTarget,
+    }),
     summary: buildFindingSummary(kind, elementReport?.tag ?? null),
+    fixHint: findingFixHintForCode(code),
     bbox,
     regionCount: params.regions.length,
     mismatchPixels,
@@ -244,14 +273,11 @@ function buildDraftFinding(params: {
         ? 0
         : Number(((mismatchPixels / params.totalPixels) * 100).toFixed(4)),
     issueTypes: issueTypesForKind(kind),
-    signals: buildFindingSignals({
-      kind,
-      bbox,
-      element: params.element,
-      canvasWidth: params.canvasWidth,
-      canvasHeight: params.canvasHeight,
-    }),
-    hotspots: buildHotspotBoxes(params.regions, primaryBox),
+    likelyAffectedProperties: findingAffectedPropertiesForCode(code),
+    signals,
+    evidenceRefs: buildFindingEvidenceRefs(code, signals, hotspots),
+    hotspots,
+    actionTarget,
     element: elementReport,
   };
 }
@@ -508,16 +534,16 @@ function buildFindingSummary(kind: RegionKind, tag: string | null): string {
 
   switch (kind) {
     case "dimension":
-      return `${subject} is missing content, has extra content, or was captured at the wrong canvas size.`;
+      return `${subject} has missing, extra, or misframed content.`;
     case "layout":
-      return `${subject} differs in position, spacing, or alignment.`;
+      return `${subject} has layout drift.`;
     case "color":
-      return `${subject} differs in color or visual styling.`;
+      return `${subject} has style drift.`;
     case "mixed":
-      return `${subject} differs in both layout and styling.`;
+      return `${subject} has layout and style drift.`;
     case "pixel":
     default:
-      return `${subject} differs in rendering or fine-grained styling.`;
+      return `${subject} has rendering drift.`;
   }
 }
 
@@ -534,6 +560,205 @@ function issueTypesForKind(kind: RegionKind): IssueType[] {
     case "pixel":
     default:
       return ["style"];
+  }
+}
+
+function buildFindingCode(kind: RegionKind, signals: FindingSignalReport[]): FindingCode {
+  for (const signalCode of [
+    "probable_text_clipping",
+    "possible_capture_crop",
+    "possible_viewport_mismatch",
+  ] as const) {
+    if (!signals.some((signal) => signal.code === signalCode)) {
+      continue;
+    }
+
+    switch (signalCode) {
+      case "probable_text_clipping":
+        return "text_clipping";
+      case "possible_capture_crop":
+        return "capture_crop";
+      case "possible_viewport_mismatch":
+        return "viewport_mismatch";
+      default:
+        break;
+    }
+  }
+
+  switch (kind) {
+    case "dimension":
+      return "missing_or_extra_content";
+    case "mixed":
+      return "layout_style_mismatch";
+    case "layout":
+      return "layout_mismatch";
+    case "color":
+      return "style_mismatch";
+    case "pixel":
+    default:
+      return "rendering_mismatch";
+  }
+}
+
+function findingFixHintForCode(code: FindingCode): string {
+  switch (code) {
+    case "text_clipping":
+      return "Fix text overflow, line clamp, or available width.";
+    case "capture_crop":
+      return "Recapture with a broader selector scope or viewport.";
+    case "viewport_mismatch":
+      return "Verify viewport, selected frame, and capture target before retrying.";
+    case "missing_or_extra_content":
+      return "Verify the target content and frame, then fix missing or extra UI.";
+    case "layout_mismatch":
+      return "Fix positioning, spacing, or alignment.";
+    case "style_mismatch":
+      return "Fix colors, fills, borders, or shadows.";
+    case "layout_style_mismatch":
+      return "Fix both layout alignment and visual styles.";
+    case "rendering_mismatch":
+    default:
+      return "Tighten typography, radius, or shadow styling.";
+  }
+}
+
+function findingAffectedPropertiesForCode(code: FindingCode): AffectedPropertyCode[] {
+  switch (code) {
+    case "text_clipping":
+      return ["text.overflow", "text.lineClamp", "size.width"];
+    case "capture_crop":
+      return ["capture.selectorScope", "capture.viewport"];
+    case "viewport_mismatch":
+      return ["capture.viewport", "reference.frame"];
+    case "missing_or_extra_content":
+      return ["size.width", "size.height", "reference.frame"];
+    case "layout_mismatch":
+      return ["layout.position", "layout.spacing", "layout.alignment"];
+    case "style_mismatch":
+      return ["style.color", "style.background", "style.border", "style.radius", "style.shadow"];
+    case "layout_style_mismatch":
+      return [
+        "layout.position",
+        "layout.spacing",
+        "layout.alignment",
+        "style.color",
+        "style.background",
+        "style.border",
+        "style.radius",
+        "style.shadow",
+      ];
+    case "rendering_mismatch":
+    default:
+      return ["style.typography", "style.radius", "style.shadow"];
+  }
+}
+
+function buildFindingConfidence(params: {
+  source: FindingSource;
+  kind: RegionKind;
+  signals: FindingSignalReport[];
+  actionTarget: ActionTargetReport | null;
+}): number {
+  const baseline = baselineFindingConfidence(params.source, params.kind);
+  const signalScore = params.signals.reduce((maxScore, signal) => {
+    const score = signalConfidenceScore(signal.confidence);
+    return score > maxScore ? score : maxScore;
+  }, 0);
+  const selectorBonus = params.actionTarget?.selector ? 0.05 : 0;
+
+  return roundConfidence(Math.max(baseline, signalScore) + selectorBonus);
+}
+
+function baselineFindingConfidence(source: FindingSource, kind: RegionKind): number {
+  if (source === "dom-element") {
+    if (kind === "dimension") {
+      return 0.78;
+    }
+
+    if (kind === "pixel") {
+      return 0.64;
+    }
+
+    return 0.72;
+  }
+
+  if (kind === "dimension") {
+    return 0.72;
+  }
+
+  if (kind === "pixel") {
+    return 0.5;
+  }
+
+  return 0.58;
+}
+
+function signalConfidenceScore(confidence: FindingSignalReport["confidence"]): number {
+  switch (confidence) {
+    case "high":
+      return 0.9;
+    case "medium":
+      return 0.75;
+    case "low":
+    default:
+      return 0.55;
+  }
+}
+
+function buildFindingEvidenceRefs(
+  code: FindingCode,
+  signals: FindingSignalReport[],
+  hotspots: BoundingBox[],
+): FindingEvidenceRefReport[] {
+  const evidenceRefs: FindingEvidenceRefReport[] = signals.map((signal) => ({
+    type: "signal",
+    code: signal.code,
+  }));
+  const metricKey = metricKeyForFindingCode(code);
+
+  if (metricKey) {
+    evidenceRefs.push({
+      type: "metric",
+      key: metricKey,
+    });
+  }
+
+  for (let index = 0; index < hotspots.length; index += 1) {
+    evidenceRefs.push({
+      type: "hotspot",
+      index,
+    });
+  }
+
+  evidenceRefs.push(
+    {
+      type: "artifact",
+      key: "heatmap",
+    },
+    {
+      type: "artifact",
+      key: "diff",
+    },
+  );
+
+  return evidenceRefs;
+}
+
+function metricKeyForFindingCode(code: FindingCode): FindingMetricKey {
+  switch (code) {
+    case "viewport_mismatch":
+    case "missing_or_extra_content":
+      return "dimensionMismatch";
+    case "layout_mismatch":
+    case "layout_style_mismatch":
+      return "structuralMismatchPercent";
+    case "style_mismatch":
+      return "meanColorDelta";
+    case "text_clipping":
+    case "capture_crop":
+    case "rendering_mismatch":
+    default:
+      return "mismatchPercent";
   }
 }
 
@@ -693,6 +918,19 @@ function toElementReport(element: DomSnapshotElement): FindingElementReport {
     textSnippet: element.textSnippet,
     bbox: element.bbox,
   };
+}
+
+function toActionTargetReport(element: DomSnapshotElement): ActionTargetReport {
+  return {
+    selector: element.selector,
+    tag: element.tag,
+    role: element.role,
+    textSnippet: element.textSnippet,
+  };
+}
+
+function roundConfidence(value: number): number {
+  return Number(Math.min(0.99, Math.max(0.05, value)).toFixed(2));
 }
 
 function buildSeverityRollups(findings: DraftFinding[]): SeverityRollup[] {

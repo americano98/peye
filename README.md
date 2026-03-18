@@ -207,10 +207,14 @@ peye compare \
 `report.json` is versioned and compact by default:
 
 - `analysisMode` is `dom-elements` for URL captures and `visual-clusters` for local image inputs
+- `summary.topActions` and `summary.rootCauseCandidates` turn the report into a decision object instead of a diff-only payload
+- `summary.safeToAutofix` and `summary.requiresRecapture` let an agent choose between patching code, fixing setup, or stopping early
 - `images` preserves normalized preview, reference, and padded canvas dimensions for fast debugging
 - `inputs.preview.ignoreSelectors` records requested ignore selectors and how many visible elements actually intersected the capture area
 - `findings` is capped to the top actionable mismatches
+- `findings[].code`, `findings[].fixHint`, `findings[].likelyAffectedProperties`, and `findings[].actionTarget` expose stable next-step metadata
 - `findings[].signals` adds stable heuristic hints such as probable text clipping, capture crop, and viewport mismatch
+- `findings[].evidenceRefs` points back to the exact signals, metrics, hotspots, and artifacts that support each finding
 - `findings[].hotspots` exposes the top mismatch subregions without forcing the caller to inspect images first
 - `rollups.rawRegionCount` preserves the internal mismatch count without emitting every low-level region
 - `error` is `null` on successful comparisons and contains a stable `code`, `message`, and `exitCode` for failure reports
@@ -240,7 +244,27 @@ Example `report.json` shape:
   "summary": {
     "recommendation": "retry_fix",
     "severity": "medium",
-    "reason": "Mismatch is 3.21%; localized issues were detected and should be fixed before retrying."
+    "reason": "Mismatch is 3.21%; localized issues were detected and should be fixed before retrying.",
+    "topActions": [
+      {
+        "code": "fix_text_overflow",
+        "confidence": 0.84,
+        "reason": "Fix text overflow, line clamp, or available width.",
+        "findingIds": ["finding-001"]
+      }
+    ],
+    "rootCauseCandidates": [
+      {
+        "code": "text_overflow",
+        "confidence": 0.84,
+        "reason": "Text appears clipped inside the affected element.",
+        "findingIds": ["finding-001"],
+        "signalCodes": ["probable_text_clipping"]
+      }
+    ],
+    "overallConfidence": 0.84,
+    "safeToAutofix": true,
+    "requiresRecapture": false
   },
   "inputs": {
     "preview": {
@@ -308,9 +332,12 @@ Example `report.json` shape:
     {
       "id": "finding-001",
       "source": "dom-element",
-      "severity": "medium",
       "kind": "mixed",
-      "summary": "Element <button> differs in both layout and styling.",
+      "code": "text_clipping",
+      "severity": "medium",
+      "confidence": 0.84,
+      "summary": "Element <button> has layout and style drift.",
+      "fixHint": "Fix text overflow, line clamp, or available width.",
       "bbox": {
         "x": 20,
         "y": 80,
@@ -321,6 +348,7 @@ Example `report.json` shape:
       "mismatchPixels": 519,
       "mismatchPercentOfCanvas": 1.54,
       "issueTypes": ["position", "spacing", "style"],
+      "likelyAffectedProperties": ["text.overflow", "text.lineClamp", "size.width"],
       "signals": [
         {
           "code": "probable_text_clipping",
@@ -328,7 +356,20 @@ Example `report.json` shape:
           "message": "Text content likely overflows the element bounds and is being clipped on the horizontal axis."
         }
       ],
+      "evidenceRefs": [
+        { "type": "signal", "code": "probable_text_clipping" },
+        { "type": "metric", "key": "mismatchPercent" },
+        { "type": "hotspot", "index": 0 },
+        { "type": "artifact", "key": "heatmap" },
+        { "type": "artifact", "key": "diff" }
+      ],
       "hotspots": [{ "x": 20, "y": 80, "width": 52, "height": 36 }],
+      "actionTarget": {
+        "selector": "section#hero > button#cta",
+        "tag": "button",
+        "role": null,
+        "textSnippet": "Buy"
+      },
       "element": {
         "tag": "button",
         "selector": "section#hero > button#cta",
@@ -362,7 +403,27 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
   "summary": {
     "recommendation": "needs_human_review",
     "severity": "medium",
-    "reason": "Preview URL requires --viewport so the browser screenshot is deterministic."
+    "reason": "Preview URL requires --viewport so the browser screenshot is deterministic.",
+    "topActions": [
+      {
+        "code": "fix_preview_setup",
+        "confidence": 0.95,
+        "reason": "Fix the preview input or capture environment.",
+        "findingIds": []
+      }
+    ],
+    "rootCauseCandidates": [
+      {
+        "code": "preview_input_or_runtime_error",
+        "confidence": 0.95,
+        "reason": "The preview input or browser capture failed before comparison.",
+        "findingIds": [],
+        "signalCodes": []
+      }
+    ],
+    "overallConfidence": 0.95,
+    "safeToAutofix": false,
+    "requiresRecapture": true
   },
   "error": {
     "code": "preview_viewport_required",
@@ -371,6 +432,8 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
   }
 }
 ```
+
+For automation, prefer `summary.topActions[0]`, `summary.rootCauseCandidates[0]`, `summary.safeToAutofix`, `summary.requiresRecapture`, `findings[].code`, `findings[].fixHint`, and `findings[].actionTarget` before falling back to `summary.reason`.
 
 ## Exit Codes
 

@@ -341,6 +341,12 @@ describe("built CLI integration", () => {
       expect(stdoutReport.error?.code).toBe("preview_browser_missing");
       expect(stdoutReport.error?.message).toContain("peye install chromium");
       expect(stdoutReport.summary.reason).toContain("peye install chromium");
+      expect(stdoutReport.summary.topActions[0]?.code).toBe("fix_preview_setup");
+      expect(stdoutReport.summary.rootCauseCandidates[0]?.code).toBe(
+        "preview_input_or_runtime_error",
+      );
+      expect(stdoutReport.summary.safeToAutofix).toBe(false);
+      expect(stdoutReport.summary.requiresRecapture).toBe(true);
     } finally {
       await server.close();
     }
@@ -380,6 +386,12 @@ describe("built CLI integration", () => {
       message: "--ignore-selector must not be empty.",
       exitCode: 1,
     });
+    expect(stdoutReport.summary.topActions[0]?.code).toBe("fix_preview_setup");
+    expect(stdoutReport.summary.rootCauseCandidates[0]?.code).toBe(
+      "preview_input_or_runtime_error",
+    );
+    expect(stdoutReport.summary.safeToAutofix).toBe(false);
+    expect(stdoutReport.summary.requiresRecapture).toBe(true);
     expect(stdoutReport.inputs.preview.ignoreSelectors).toEqual([
       { selector: " ", matchedElementCount: null },
     ]);

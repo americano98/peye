@@ -21,7 +21,7 @@ Use `peye` when an agent needs to:
 ## Agent Stance
 
 - Treat `report.json` as the primary result.
-- Trust `summary.recommendation`, `error.code`, `findings`, and `signals` more than your visual guess from the PNGs.
+- Trust `summary.topActions`, `summary.rootCauseCandidates`, `summary.safeToAutofix`, `summary.requiresRecapture`, `error.code`, and `findings` more than your visual guess from the PNGs.
 - Use `heatmap.png`, `overlay.png`, and `diff.png` as supporting evidence, not the main contract.
 - If `recommendation` is `retry_fix` and the agent is actively implementing that UI, the default action is to try to improve the implementation and rerun.
 - If `recommendation` is `needs_human_review`, do not keep auto-tuning blindly. First verify setup: viewport, selector, reference target, and capture scope.
@@ -139,10 +139,12 @@ peye compare \
 Read these first:
 
 - `summary.recommendation`
-- `summary.reason`
+- `summary.topActions`
+- `summary.rootCauseCandidates`
+- `summary.safeToAutofix`
+- `summary.requiresRecapture`
 - `error`
 - `findings`
-- `signals`
 
 Interpret `summary.recommendation` like this:
 
@@ -157,8 +159,11 @@ Use these fields for diagnosis:
 - `metrics.ignoredPixels` and `metrics.ignoredPercent`: excluded area from `--ignore-selector`
 - `metrics.structuralMismatchPercent`: layout-sensitive drift
 - `findings[]`: main actionable mismatches
-- `findings[].element.selector`: the likely DOM target in URL mode
+- `findings[].code`: stable mismatch taxonomy
+- `findings[].fixHint`: short next-step hint
+- `findings[].actionTarget.selector`: the likely DOM target in URL mode
 - `findings[].signals[].code`: stable automation hint
+- `findings[].evidenceRefs`: links back to the supporting signals, metrics, hotspots, and artifacts
 
 If `inputs.preview.ignoreSelectors[].matchedElementCount` is `0`, that ignore rule did nothing in the current capture.
 
@@ -176,9 +181,10 @@ When using `peye` during implementation:
    - wrong selector
    - wrong area captured
    - missing ignore selector for obvious page noise
-4. If setup is sound and recommendation is `retry_fix`, fix the implementation.
-5. Rerun `peye` into the same cleaned scratch directory.
-6. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
+4. If `summary.requiresRecapture` is `true`, fix setup or recapture before changing implementation code.
+5. If setup is sound and `summary.topActions[0]` points at a concrete DOM target, use that as the default next fix.
+6. Rerun `peye` into the same cleaned scratch directory.
+7. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
 
 Do not keep editing forever on a `needs_human_review` result unless the cause is clearly understood.
 
