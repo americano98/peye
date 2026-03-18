@@ -54,6 +54,8 @@ export interface ImageDimensionsReport {
 export interface MetricsReport {
   mismatchPixels: number;
   mismatchPercent: number;
+  ignoredPixels: number;
+  ignoredPercent: number;
   meanColorDelta: number | null;
   maxColorDelta: number | null;
   structuralMismatchPercent: number | null;
@@ -73,6 +75,15 @@ export interface InputSourceReport {
   kind: InputSourceKind;
   resolved: string;
   selector: string | null;
+}
+
+export interface IgnoreSelectorReport {
+  selector: string;
+  matchedElementCount: number | null;
+}
+
+export interface PreviewInputSourceReport extends InputSourceReport {
+  ignoreSelectors: IgnoreSelectorReport[];
 }
 
 export interface ReferenceInputSourceReport extends InputSourceReport {
@@ -159,7 +170,7 @@ export interface CompareReport {
   analysisMode: AnalysisMode;
   summary: SummaryReport;
   inputs: {
-    preview: InputSourceReport;
+    preview: PreviewInputSourceReport;
     reference: ReferenceInputSourceReport;
     viewport: Viewport | null;
     mode: CompareMode;
@@ -180,6 +191,7 @@ export interface CompareCommandOptions {
   viewport?: string;
   mode: CompareMode;
   selector?: string;
+  ignoreSelectors: string[];
   fullPage: boolean;
   thresholdPass: number;
   thresholdTolerated: number;

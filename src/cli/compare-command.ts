@@ -2,8 +2,19 @@ import path from "node:path";
 import type { Command } from "commander";
 import { DEFAULT_MODE, DEFAULT_THRESHOLDS } from "../config/defaults.js";
 import { runCompare } from "../core/run-compare.js";
+import { normalizeIgnoreSelectors } from "../io/inputs.js";
 import { COMPARE_MODES, type CompareCommandOptions } from "../types/report.js";
 import { AppError, isAppError } from "../utils/errors.js";
+
+interface RawCompareCliOptions extends Omit<
+  CompareCommandOptions,
+  "ignoreSelectors" | "thresholdPass" | "thresholdTolerated" | "thresholdRetry"
+> {
+  ignoreSelector?: string[];
+  thresholdPass: number;
+  thresholdTolerated: number;
+  thresholdRetry: number;
+}
 
 interface CompareCliOptions extends CompareCommandOptions {
   quiet: boolean;
@@ -23,6 +34,12 @@ export function registerCompareCommand(program: Command): void {
     )
     .option("--mode <mode>", "Analysis mode: all, pixel, layout, color", DEFAULT_MODE)
     .option("--selector <css>", "CSS selector for preview element capture")
+    .option(
+      "--ignore-selector <css>",
+      "Ignore visible preview elements matched by CSS selector during diffing",
+      collectOptionValues,
+      [],
+    )
     .option("--full-page", "Capture the full preview page when preview is a URL", false)
     .option("--quiet", "Suppress the human-readable terminal summary", false)
     .option(
@@ -48,16 +65,22 @@ export function registerCompareCommand(program: Command): void {
       parseFloat,
       DEFAULT_THRESHOLDS.retry,
     )
-    .action(async (rawOptions: CompareCliOptions) => {
-      const { quiet, reportStdout, ...options } = validateOptions(rawOptions);
-      const result = await runCompare(options);
+    .action(
+      async (
+        rawOptions: RawCompareCliOptions & Pick<CompareCliOptions, "quiet" | "reportStdout">,
+      ) => {
+        const { quiet, reportStdout, ...options } = validateOptions(rawOptions);
+        const result = await runCompare(options);
 
-      writeCliOutput(result.report, { quiet, reportStdout });
-      process.exitCode = result.exitCode;
-    });
+        writeCliOutput(result.report, { quiet, reportStdout });
+        process.exitCode = result.exitCode;
+      },
+    );
 }
 
-function validateOptions(options: CompareCliOptions): CompareCliOptions {
+function validateOptions(
+  options: RawCompareCliOptions & Pick<CompareCliOptions, "quiet" | "reportStdout">,
+): CompareCliOptions {
   if (!COMPARE_MODES.includes(options.mode)) {
     throw new AppError(
       `Invalid --mode value "${options.mode}". Expected one of: ${COMPARE_MODES.join(", ")}.`,
@@ -74,7 +97,10 @@ function validateOptions(options: CompareCliOptions): CompareCliOptions {
     }
   }
 
-  return options;
+  return {
+    ...options,
+    ignoreSelectors: normalizeIgnoreSelectors(options.ignoreSelector),
+  };
 }
 
 function writeCliOutput(
@@ -116,4 +142,8 @@ export function handleCliError(error: unknown): void {
   }
 
   process.exitCode = 1;
+}
+
+function collectOptionValues(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }

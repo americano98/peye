@@ -34,28 +34,25 @@ export function runComparisonEngine(params: {
   preview: Uint8ClampedArray;
   width: number;
   height: number;
+  ignoreRegions: Array<{ x: number; y: number; width: number; height: number }>;
   referenceOriginal: { width: number; height: number };
   previewOriginal: { width: number; height: number };
   mode: CompareMode;
 }): EngineResult {
   const totalPixels = params.width * params.height;
+  const ignoreMask = rasterizeIgnoreRegions(params.ignoreRegions, params.width, params.height);
+  const ignoredPixels = countMaskedPixels(ignoreMask);
+  const comparablePixels = Math.max(0, totalPixels - ignoredPixels);
   const diffBuffer = new Uint8ClampedArray(totalPixels * 4);
   const maskBuffer = new Uint8ClampedArray(totalPixels * 4);
   const colorDeltaMap = new Float32Array(totalPixels);
-  const mismatchPixels = pixelmatch(
-    params.reference,
-    params.preview,
-    diffBuffer,
-    params.width,
-    params.height,
-    {
-      threshold: DEFAULT_PIXELMATCH_THRESHOLD,
-      alpha: 0.2,
-      diffColor: [255, 0, 0],
-      diffColorAlt: [0, 180, 255],
-      includeAA: true,
-    },
-  );
+  pixelmatch(params.reference, params.preview, diffBuffer, params.width, params.height, {
+    threshold: DEFAULT_PIXELMATCH_THRESHOLD,
+    alpha: 0.2,
+    diffColor: [255, 0, 0],
+    diffColorAlt: [0, 180, 255],
+    includeAA: true,
+  });
 
   pixelmatch(params.reference, params.preview, maskBuffer, params.width, params.height, {
     threshold: DEFAULT_PIXELMATCH_THRESHOLD,
@@ -67,11 +64,17 @@ export function runComparisonEngine(params: {
   });
 
   const mismatchMask = new Uint8Array(totalPixels);
+  let mismatchPixels = 0;
   let colorDeltaSum = 0;
   let maxColorDelta = 0;
   let mismatchedColorSamples = 0;
 
   for (let index = 0; index < totalPixels; index += 1) {
+    if (ignoreMask[index] === 1) {
+      scrubIgnoredPixel(diffBuffer, index, params.reference, params.preview);
+      continue;
+    }
+
     const offset = index * 4;
     const hasMismatch =
       maskBuffer[offset] > 0 ||
@@ -84,6 +87,7 @@ export function runComparisonEngine(params: {
     }
 
     mismatchMask[index] = 1;
+    mismatchPixels += 1;
     const redDelta = params.reference[offset] - params.preview[offset];
     const greenDelta = params.reference[offset + 1] - params.preview[offset + 1];
     const blueDelta = params.reference[offset + 2] - params.preview[offset + 2];
@@ -101,7 +105,7 @@ export function runComparisonEngine(params: {
   );
   const structural =
     params.mode === "all" || params.mode === "layout"
-      ? analyzeStructure(params.reference, params.preview, params.width, params.height)
+      ? analyzeStructure(params.reference, params.preview, params.width, params.height, ignoreMask)
       : null;
 
   const rawRegions = buildRegions({
@@ -123,7 +127,10 @@ export function runComparisonEngine(params: {
     metrics: {
       mismatchPixels,
       mismatchPercent:
-        totalPixels === 0 ? 0 : Number(((mismatchPixels / totalPixels) * 100).toFixed(4)),
+        comparablePixels === 0 ? 0 : Number(((mismatchPixels / comparablePixels) * 100).toFixed(4)),
+      ignoredPixels,
+      ignoredPercent:
+        totalPixels === 0 ? 0 : Number(((ignoredPixels / totalPixels) * 100).toFixed(4)),
       meanColorDelta:
         params.mode === "all" || params.mode === "color"
           ? mismatchedColorSamples > 0
@@ -145,6 +152,58 @@ export function runComparisonEngine(params: {
       diff: diffBuffer,
     },
   };
+}
+
+function rasterizeIgnoreRegions(
+  ignoreRegions: Array<{ x: number; y: number; width: number; height: number }>,
+  width: number,
+  height: number,
+): Uint8Array {
+  const ignoreMask = new Uint8Array(width * height);
+
+  for (const region of ignoreRegions) {
+    const xStart = Math.max(0, region.x);
+    const yStart = Math.max(0, region.y);
+    const xEnd = Math.min(width, region.x + region.width);
+    const yEnd = Math.min(height, region.y + region.height);
+
+    if (xEnd <= xStart || yEnd <= yStart) {
+      continue;
+    }
+
+    for (let y = yStart; y < yEnd; y += 1) {
+      for (let x = xStart; x < xEnd; x += 1) {
+        ignoreMask[y * width + x] = 1;
+      }
+    }
+  }
+
+  return ignoreMask;
+}
+
+function countMaskedPixels(mask: Uint8Array): number {
+  let count = 0;
+
+  for (const value of mask) {
+    if (value === 1) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+function scrubIgnoredPixel(
+  image: Uint8ClampedArray,
+  index: number,
+  reference: Uint8ClampedArray,
+  preview: Uint8ClampedArray,
+): void {
+  const offset = index * 4;
+  image[offset] = Math.round((reference[offset] + preview[offset]) / 2);
+  image[offset + 1] = Math.round((reference[offset + 1] + preview[offset + 1]) / 2);
+  image[offset + 2] = Math.round((reference[offset + 2] + preview[offset + 2]) / 2);
+  image[offset + 3] = 255;
 }
 
 function buildDimensionMismatch(

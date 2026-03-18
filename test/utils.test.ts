@@ -11,6 +11,8 @@ function createMetrics(
   return {
     mismatchPixels: overrides.mismatchPixels,
     mismatchPercent: overrides.mismatchPercent,
+    ignoredPixels: overrides.ignoredPixels ?? 0,
+    ignoredPercent: overrides.ignoredPercent ?? 0,
     meanColorDelta: overrides.meanColorDelta ?? null,
     maxColorDelta: overrides.maxColorDelta ?? null,
     structuralMismatchPercent: overrides.structuralMismatchPercent ?? null,

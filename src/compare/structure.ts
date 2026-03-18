@@ -12,6 +12,7 @@ export function analyzeStructure(
   preview: Uint8ClampedArray,
   width: number,
   height: number,
+  ignoreMask?: Uint8Array,
 ): StructuralAnalysis {
   const lumaReference = rgbaToLuma(reference, width, height);
   const lumaPreview = rgbaToLuma(preview, width, height);
@@ -22,18 +23,26 @@ export function analyzeStructure(
   let unionCount = 0;
   let diffCount = 0;
 
-  for (let index = 0; index < edgeDiffMask.length; index += 1) {
-    const ref = edgeMaskReference[index];
-    const prev = edgeMaskPreview[index];
-    const union = ref === 1 || prev === 1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
 
-    if (union) {
-      unionCount += 1;
-    }
+      if (touchesIgnoredNeighborhood(ignoreMask, x, y, width, height)) {
+        continue;
+      }
 
-    if (ref !== prev) {
-      edgeDiffMask[index] = 1;
-      diffCount += 1;
+      const ref = edgeMaskReference[index];
+      const prev = edgeMaskPreview[index];
+      const union = ref === 1 || prev === 1;
+
+      if (union) {
+        unionCount += 1;
+      }
+
+      if (ref !== prev) {
+        edgeDiffMask[index] = 1;
+        diffCount += 1;
+      }
     }
   }
 
@@ -43,6 +52,33 @@ export function analyzeStructure(
     edgeDiffMask,
     structuralMismatchPercent: unionCount === 0 ? 0 : (diffCount / unionCount) * 100,
   };
+}
+
+function touchesIgnoredNeighborhood(
+  ignoreMask: Uint8Array | undefined,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): boolean {
+  if (!ignoreMask) {
+    return false;
+  }
+
+  const xStart = Math.max(0, x - 1);
+  const yStart = Math.max(0, y - 1);
+  const xEnd = Math.min(width - 1, x + 1);
+  const yEnd = Math.min(height - 1, y + 1);
+
+  for (let candidateY = yStart; candidateY <= yEnd; candidateY += 1) {
+    for (let candidateX = xStart; candidateX <= xEnd; candidateX += 1) {
+      if (ignoreMask[candidateY * width + candidateX] === 1) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function rgbaToLuma(data: Uint8ClampedArray, width: number, height: number): Float32Array {

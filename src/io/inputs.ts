@@ -2,7 +2,8 @@ import path from "node:path";
 import type { ParsedPreviewInput, ParsedReferenceInput } from "../types/internal.js";
 import type {
   CompareCommandOptions,
-  InputSourceReport,
+  IgnoreSelectorReport,
+  PreviewInputSourceReport,
   ReferenceInputSourceReport,
   Viewport,
 } from "../types/report.js";
@@ -14,6 +15,7 @@ import { ensureFileExists } from "./fs.js";
 export async function parsePreviewInput(
   options: CompareCommandOptions,
 ): Promise<ParsedPreviewInput> {
+  const ignoreSelectors = normalizeIgnoreSelectors(options.ignoreSelectors);
   const selector = hashToSelector(options.preview, options.selector);
 
   if (isHttpUrl(options.preview)) {
@@ -42,8 +44,15 @@ export async function parsePreviewInput(
       input: options.preview,
       resolved: new URL(options.preview).toString(),
       selector,
+      ignoreSelectors,
       viewport,
     };
+  }
+
+  if (ignoreSelectors.length > 0) {
+    throw new AppError("--ignore-selector can only be used when --preview is a URL.", {
+      code: "preview_ignore_selector_requires_url",
+    });
   }
 
   if (options.selector) {
@@ -66,6 +75,7 @@ export async function parsePreviewInput(
     input: options.preview,
     resolved: resolvedPath,
     selector: null,
+    ignoreSelectors: [],
     viewport,
   };
 }
@@ -100,14 +110,19 @@ export function resolveViewportForReport(
 }
 
 export function inferPreviewInputSource(
-  options: Pick<CompareCommandOptions, "preview" | "selector">,
-): InputSourceReport {
+  options: Pick<CompareCommandOptions, "preview" | "selector" | "ignoreSelectors">,
+): PreviewInputSourceReport {
+  const ignoreSelectors = buildIgnoreSelectorReports(
+    normalizeIgnoreSelectors(options.ignoreSelectors),
+  );
+
   if (isHttpUrl(options.preview)) {
     return {
       input: options.preview,
       kind: "url",
       resolved: new URL(options.preview).toString(),
       selector: hashToSelector(options.preview, options.selector),
+      ignoreSelectors,
     };
   }
 
@@ -116,6 +131,7 @@ export function inferPreviewInputSource(
     kind: "path",
     resolved: path.resolve(options.preview),
     selector: null,
+    ignoreSelectors,
   };
 }
 
@@ -137,4 +153,38 @@ export function inferReferenceInputSource(reference: string): ReferenceInputSour
     selector: null,
     transport: "path",
   };
+}
+
+export function normalizeIgnoreSelectors(ignoreSelectors: readonly string[] | undefined): string[] {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+
+  for (const selector of ignoreSelectors ?? []) {
+    const trimmed = selector.trim();
+
+    if (trimmed.length === 0) {
+      throw new AppError("--ignore-selector must not be empty.", {
+        code: "preview_ignore_selector_empty",
+      });
+    }
+
+    if (seen.has(trimmed)) {
+      continue;
+    }
+
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+
+  return normalized;
+}
+
+export function buildIgnoreSelectorReports(
+  ignoreSelectors: readonly string[],
+  matchedCounts?: ReadonlyMap<string, number>,
+): IgnoreSelectorReport[] {
+  return ignoreSelectors.map((selector) => ({
+    selector,
+    matchedElementCount: matchedCounts?.get(selector) ?? null,
+  }));
 }

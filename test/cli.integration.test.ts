@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, test } from "vitest";
 import type { CompareReport } from "../src/types/report.js";
 import { createPngFromSvg, createTempDir } from "./helpers/fixtures.js";
+import { startServer } from "./helpers/http.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const distBinPath = path.join(repoRoot, "dist", "bin.js");
@@ -180,5 +181,96 @@ describe("built CLI integration", () => {
     expect(stdoutReport.summary.recommendation).toBe("pass");
     expect(stdoutReport.error).toBeNull();
     expect(stdoutReport).toEqual(writtenReport);
+  });
+
+  test("supports repeatable --ignore-selector and reports selector matches in stdout JSON", async () => {
+    const dir = await createTempDir("peye-cli-ignore");
+    const referencePath = path.join(dir, "reference.png");
+    const outputPath = path.join(dir, "out");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 80,
+      body: `<rect x="20" y="20" width="80" height="24" rx="4" fill="#0b84ff" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 120px; height: 80px; }
+                #hero button {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  width: 80px;
+                  height: 24px;
+                  border: 0;
+                  border-radius: 4px;
+                  background: #0b84ff;
+                  color: transparent;
+                  font-size: 0;
+                }
+                #noise {
+                  position: fixed;
+                  top: 0;
+                  left: 0;
+                  width: 120px;
+                  height: 20px;
+                  background: #ff6633;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button>Buy</button>
+              </section>
+              <div id="noise" class="noise"></div>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCli([
+        "compare",
+        "--preview",
+        `${server.baseUrl}/#hero`,
+        "--reference",
+        referencePath,
+        "--output",
+        outputPath,
+        "--viewport",
+        "320x240",
+        "--ignore-selector",
+        "#noise",
+        "--ignore-selector",
+        ".noise",
+        "--report-stdout",
+      ]);
+      const stdoutReport = JSON.parse(result.stdout) as CompareReport;
+
+      expect(result.code).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(stdoutReport.inputs.preview.ignoreSelectors).toEqual([
+        { selector: "#noise", matchedElementCount: 1 },
+        { selector: ".noise", matchedElementCount: 1 },
+      ]);
+      expect(stdoutReport.metrics.ignoredPixels).toBe(120 * 20);
+      expect(stdoutReport.summary.recommendation).toBe("pass");
+    } finally {
+      await server.close();
+    }
   });
 });
