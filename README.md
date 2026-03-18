@@ -89,9 +89,11 @@ For automation, the most important fields are:
 - `summary.recommendation`
 - `summary.decisionTrace`
 - `summary.topActions`
+- `summary.agentChecks`
 - `summary.primaryBlockers`
 - `summary.safeToAutofix`
 - `summary.requiresRecapture`
+- `summary.requiresSanityCheck`
 - `findings`
 - `error`
 

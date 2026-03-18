@@ -20,11 +20,14 @@ export const SUMMARY_ACTION_CODES = [
   "fix_layout_styles",
   "fix_visual_styles",
   "verify_missing_or_extra_content",
+  "run_sanity_check_same_target",
   "recapture_with_broader_scope",
   "verify_viewport_or_reference",
   "fix_preview_setup",
   "fix_reference_setup",
+  "fix_output_path_or_permissions",
 ] as const;
+export const SUMMARY_AGENT_CHECK_CODES = ["validate_same_target_before_fix"] as const;
 export const DECISION_AXES = [
   "pixel",
   "layout",
@@ -65,6 +68,7 @@ export const ROOT_CAUSE_CODES = [
   "rendering_drift",
   "preview_input_or_runtime_error",
   "reference_input_or_acquisition_error",
+  "artifact_output_failure",
 ] as const;
 export const ROOT_CAUSE_GROUP_IDS = [
   "text-wrap-regression",
@@ -76,6 +80,7 @@ export const ROOT_CAUSE_GROUP_IDS = [
   "rendering-drift",
   "preview-setup-error",
   "reference-setup-error",
+  "output-write-error",
 ] as const;
 export const AFFECTED_PROPERTY_CODES = [
   "layout.position",
@@ -110,6 +115,7 @@ export type AnalysisMode = (typeof ANALYSIS_MODES)[number];
 export type FindingSignalCode = (typeof FINDING_SIGNAL_CODES)[number];
 export type FindingCode = (typeof FINDING_CODES)[number];
 export type SummaryActionCode = (typeof SUMMARY_ACTION_CODES)[number];
+export type SummaryAgentCheckCode = (typeof SUMMARY_AGENT_CHECK_CODES)[number];
 export type DecisionAxis = (typeof DECISION_AXES)[number];
 export type DecisionStrength = (typeof DECISION_STRENGTHS)[number];
 export type DecisionTraceCode = (typeof DECISION_TRACE_CODES)[number];
@@ -221,10 +227,12 @@ export interface SummaryReport {
   reason: string;
   decisionTrace: DecisionTraceReport[];
   topActions: SummaryActionReport[];
+  agentChecks: SummaryAgentCheckReport[];
   primaryBlockers: PrimaryBlockerReport[];
   overallConfidence: number;
   safeToAutofix: boolean;
   requiresRecapture: boolean;
+  requiresSanityCheck: boolean;
 }
 
 export interface ErrorReport {
@@ -332,6 +340,14 @@ export interface SummaryActionReport {
   confidence: number;
   reason: string;
   findingIds: string[];
+}
+
+export interface SummaryAgentCheckReport {
+  code: SummaryAgentCheckCode;
+  confidence: number;
+  reason: string;
+  findingIds: string[];
+  signalCodes: FindingSignalCode[];
 }
 
 export interface PrimaryBlockerReport {

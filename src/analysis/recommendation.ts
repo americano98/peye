@@ -22,15 +22,15 @@ const MODERATE_DIMENSION_DELTA_PX = 16;
 const MODERATE_DIMENSION_ASPECT_DELTA = 0.04;
 const TOP_FINDINGS_COUNT = 3;
 const LOCALIZED_SHARE_THRESHOLD = 0.65;
-const DIFFUSE_SHARE_THRESHOLD = 0.45;
+const DIFFUSE_SHARE_THRESHOLD = 0.3;
 const LAYOUT_LOCALIZED_THRESHOLD = 10;
 const LAYOUT_GLOBAL_THRESHOLD = 25;
 const COLOR_LOCALIZED_MEAN_DELTA = 8;
 const COLOR_LOCALIZED_MAX_DELTA = 20;
 const COLOR_GLOBAL_MEAN_DELTA = 18;
 const COLOR_GLOBAL_MAX_DELTA = 35;
-const IGNORED_AREA_MEDIUM_THRESHOLD = 10;
-const IGNORED_AREA_HIGH_THRESHOLD = 20;
+const IGNORED_AREA_MEDIUM_THRESHOLD = 25;
+const IGNORED_AREA_HIGH_THRESHOLD = 35;
 
 interface DecisionContext {
   metrics: MetricsReport;
@@ -197,15 +197,15 @@ function finalizeRecommendation(
   const colorTrace = traceByAxis.get("color");
   const pixelTrace = traceByAxis.get("pixel");
   const fixabilityTrace = traceByAxis.get("fixability");
-  const hasLocalizedFixability = fixabilityTrace?.code === "fixability_localized_actionable";
-  const hasHumanReviewOverride =
-    dimensionTrace?.code === "dimension_strong_mismatch" ||
-    setupTrace !== undefined ||
-    (layoutTrace?.code === "layout_global_drift" && !hasLocalizedFixability) ||
-    (colorTrace?.code === "color_global_drift" &&
-      !context.textClippingDetected &&
-      !hasLocalizedFixability) ||
+  const sanityCheckTrace =
+    setupTrace?.code === "setup_capture_signal_risk" ? setupTrace : undefined;
+  const ignoredAreaTrace = setupTrace?.code === "setup_ignored_area_risk" ? setupTrace : undefined;
+  const hasBroadRetryPressure =
+    layoutTrace?.code === "layout_global_drift" ||
+    colorTrace?.code === "color_global_drift" ||
     fixabilityTrace?.code === "fixability_diffuse_or_unaddressable";
+  const hasHumanReviewOverride =
+    dimensionTrace?.code === "dimension_strong_mismatch" || ignoredAreaTrace !== undefined;
   const allowsPass =
     pixelTrace?.code === "pixel_strict_pass" &&
     !context.textClippingDetected &&
@@ -224,10 +224,15 @@ function finalizeRecommendation(
     (colorTrace === undefined || colorTrace.code === "color_localized_drift");
   const hasRetryPressure =
     layoutTrace?.code === "layout_localized_drift" ||
+    layoutTrace?.code === "layout_global_drift" ||
     colorTrace?.code === "color_localized_drift" ||
+    colorTrace?.code === "color_global_drift" ||
     dimensionTrace?.code === "dimension_moderate_mismatch" ||
     context.textClippingDetected ||
-    fixabilityTrace?.code === "fixability_localized_actionable";
+    fixabilityTrace?.code === "fixability_localized_actionable" ||
+    fixabilityTrace?.code === "fixability_diffuse_or_unaddressable" ||
+    (pixelTrace?.code === "pixel_retry_range" && context.findings.length > 0) ||
+    sanityCheckTrace !== undefined;
 
   if (hasHumanReviewOverride) {
     return buildRecommendationResult(
@@ -237,7 +242,7 @@ function finalizeRecommendation(
         "high",
         strengthToSeverity(dimensionTrace?.strength ?? setupTrace?.strength ?? "high"),
       ]),
-      "Human review is required because capture/setup risk or severe dimension mismatch makes the comparison unreliable.",
+      humanReviewOverrideReason(dimensionTrace, setupTrace),
       axisTraces,
     );
   }
@@ -272,7 +277,11 @@ function finalizeRecommendation(
     return buildRecommendationResult(
       "retry_fix",
       strongestSeverity([context.highestFindingSeverity, strengthToSeverity(retryStrength)]),
-      `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; localized, fixable issues were detected and should be corrected before retrying.`,
+      sanityCheckTrace
+        ? sanityCheckTrace.reason
+        : hasBroadRetryPressure
+          ? `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; broad or diffuse issues were detected, but no hard-stop setup risk was found, so another automated fix attempt is still warranted.`
+          : `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; localized, fixable issues were detected and should be corrected before retrying.`,
       axisTraces,
     );
   }
@@ -401,15 +410,15 @@ function evaluateSetupCaptureRiskAxis(context: DecisionContext): DecisionTraceRe
     return createTrace({
       axis: "setup_capture_risk",
       code: "setup_capture_signal_risk",
-      outcome: "needs_human_review",
+      outcome: "retry_fix",
       strength: "high",
       reason:
         signalCodes.includes("possible_capture_crop") &&
         signalCodes.includes("possible_viewport_mismatch")
-          ? "Capture risk signals indicate cropped or mismatched framing, so the comparison data is not reliable enough."
+          ? "Run a sanity check to confirm the preview and reference depict the same target; if they do, continue automated fixes despite cropped or mismatched framing signals."
           : signalCodes.includes("possible_capture_crop")
-            ? "Capture crop was detected, so the comparison data is not reliable enough for automated fixing."
-            : "Viewport or frame selection appears unreliable for automated fixing.",
+            ? "Run a sanity check to confirm the preview and reference depict the same target before fixing; capture crop was detected."
+            : "Run a sanity check to confirm the preview and reference depict the same target before fixing; viewport or frame selection appears mismatched.",
       findingIds: selectFindingIds(riskyFindings),
       signalCodes,
       metricKeys: signalCodes.includes("possible_viewport_mismatch")
@@ -464,10 +473,10 @@ function evaluateLayoutAxis(context: DecisionContext): DecisionTraceReport | nul
     return createTrace({
       axis: "layout",
       code: "layout_global_drift",
-      outcome: "needs_human_review",
+      outcome: "retry_fix",
       strength: "high",
       reason:
-        "Layout drift appears global rather than localized, so automated fixing is not reliable.",
+        "Layout drift appears broad rather than localized, so fixing may require multiple automated passes.",
       findingIds: selectFindingIds(relevantFindings),
       signalCodes: collectSignalCodes(relevantFindings),
       metricKeys: ["structuralMismatchPercent"],
@@ -513,10 +522,10 @@ function evaluateColorAxis(context: DecisionContext): DecisionTraceReport | null
     return createTrace({
       axis: "color",
       code: "color_global_drift",
-      outcome: "needs_human_review",
+      outcome: "retry_fix",
       strength: "high",
       reason:
-        "Color or style drift appears global rather than localized, so automated fixing is not reliable.",
+        "Color or style drift appears broad rather than localized, so fixing may require multiple automated passes.",
       findingIds: selectFindingIds(colorFindings),
       signalCodes: collectSignalCodes(colorFindings),
       metricKeys: ["meanColorDelta", "maxColorDelta"],
@@ -639,14 +648,14 @@ function evaluateFixabilityAxis(context: DecisionContext): DecisionTraceReport |
     return createTrace({
       axis: "fixability",
       code: "fixability_diffuse_or_unaddressable",
-      outcome: "needs_human_review",
+      outcome: "retry_fix",
       strength: "high",
       reason:
         context.topFindingsMismatchShare < DIFFUSE_SHARE_THRESHOLD
-          ? "Mismatch is diffuse across too many findings for a reliable automated retry."
+          ? "Mismatch is diffuse across many findings, so automated fixing may require multiple broad passes."
           : context.hasDomFindings && context.actionableFindingRatio === 0
-            ? "Findings are not addressable to concrete DOM targets, so automated fixing is not reliable."
-            : "Too many high-severity findings were detected for a reliable automated retry.",
+            ? "Findings are not addressable to concrete DOM targets, but another automated pass may still help before escalation."
+            : "Many high-severity findings were detected, but another automated pass is still warranted before escalation.",
       findingIds: selectFindingIds(context.topFindings),
       signalCodes: collectSignalCodes(context.topFindings),
       metricKeys: ["mismatchPercent"],
@@ -680,6 +689,25 @@ function defaultHumanReviewReason(
   }
 
   return `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}% and the available evidence is not strong enough for a reliable automated retry.`;
+}
+
+function humanReviewOverrideReason(
+  dimensionTrace: DecisionTraceReport | undefined,
+  setupTrace: DecisionTraceReport | undefined,
+): string {
+  if (setupTrace && dimensionTrace?.code === "dimension_strong_mismatch") {
+    return `${setupTrace.reason} Reference and preview dimensions also diverge too much for a reliable automated verdict.`;
+  }
+
+  if (setupTrace) {
+    return setupTrace.reason;
+  }
+
+  if (dimensionTrace?.code === "dimension_strong_mismatch") {
+    return dimensionTrace.reason;
+  }
+
+  return "Human review is required because capture/setup risk or severe dimension mismatch makes the comparison unreliable.";
 }
 
 function selectFinalDriver(

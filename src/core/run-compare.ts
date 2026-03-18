@@ -113,7 +113,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
         tolerated: options.thresholdTolerated,
         retry: options.thresholdRetry,
       },
-      findings: findingsAnalysis.findings,
+      findings: findingsAnalysis.fullFindings,
     });
     const summary = buildSummaryReport({
       baseDecision: decision,

@@ -327,6 +327,9 @@ describe("decideRecommendation", () => {
     });
 
     expect(decision.recommendation).toBe("needs_human_review");
+    expect(decision.reason).toBe(
+      "Reference and preview dimensions diverge too much for a reliable automated verdict.",
+    );
     expect(decision.decisionTrace.map((trace) => trace.code)).toEqual([
       "dimension_strong_mismatch",
       "final_needs_human_review",
@@ -372,7 +375,7 @@ describe("decideRecommendation", () => {
     ]);
   });
 
-  test("treats capture signals as a human review override even inside retry range", () => {
+  test("routes capture signals through retry_fix with an agent-side sanity check", () => {
     const decision = decideRecommendation({
       thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
       metrics: createMetrics({
@@ -401,23 +404,70 @@ describe("decideRecommendation", () => {
       ],
     });
 
-    expect(decision.recommendation).toBe("needs_human_review");
+    expect(decision.recommendation).toBe("retry_fix");
+    expect(decision.reason).toBe(
+      "Run a sanity check to confirm the preview and reference depict the same target before fixing; capture crop was detected.",
+    );
     expect(decision.decisionTrace.map((trace) => trace.code)).toEqual([
       "setup_capture_signal_risk",
       "layout_localized_drift",
       "pixel_retry_range",
       "fixability_localized_actionable",
-      "final_needs_human_review",
+      "final_retry_fix",
     ]);
   });
 
-  test("treats high ignored area as low-confidence human review", () => {
+  test("keeps medium ignored area in retry_fix when findings remain actionable", () => {
     const decision = decideRecommendation({
       thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
       metrics: createMetrics({
         mismatchPixels: 180,
         mismatchPercent: 1.8,
         ignoredPercent: 12,
+        meanColorDelta: 3,
+        maxColorDelta: 5,
+        structuralMismatchPercent: 0,
+      }),
+      findings: [createFinding({ kind: "pixel", severity: "low" })],
+    });
+
+    expect(decision.recommendation).toBe("retry_fix");
+    expect(decision.decisionTrace.map((trace) => trace.code)).toEqual([
+      "pixel_retry_range",
+      "fixability_localized_actionable",
+      "final_retry_fix",
+    ]);
+  });
+
+  test("keeps high-but-not-extreme ignored area in retry_fix", () => {
+    const decision = decideRecommendation({
+      thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
+      metrics: createMetrics({
+        mismatchPixels: 180,
+        mismatchPercent: 1.8,
+        ignoredPercent: 20,
+        meanColorDelta: 3,
+        maxColorDelta: 5,
+        structuralMismatchPercent: 0,
+      }),
+      findings: [createFinding({ kind: "pixel", severity: "low" })],
+    });
+
+    expect(decision.recommendation).toBe("retry_fix");
+    expect(decision.decisionTrace.map((trace) => trace.code)).toEqual([
+      "pixel_retry_range",
+      "fixability_localized_actionable",
+      "final_retry_fix",
+    ]);
+  });
+
+  test("still treats extremely high ignored area as human review", () => {
+    const decision = decideRecommendation({
+      thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
+      metrics: createMetrics({
+        mismatchPixels: 180,
+        mismatchPercent: 1.8,
+        ignoredPercent: 35,
         meanColorDelta: 3,
         maxColorDelta: 5,
         structuralMismatchPercent: 0,
@@ -432,6 +482,40 @@ describe("decideRecommendation", () => {
       "fixability_localized_actionable",
       "final_needs_human_review",
     ]);
+  });
+
+  test("keeps broad layout drift in retry_fix when no hard-stop setup risk exists", () => {
+    const decision = decideRecommendation({
+      thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
+      metrics: createMetrics({
+        mismatchPixels: 450,
+        mismatchPercent: 4.5,
+        meanColorDelta: 6,
+        maxColorDelta: 10,
+        structuralMismatchPercent: 30,
+      }),
+      findings: [
+        createFinding({ kind: "layout", severity: "high", mismatchPixels: 120 }),
+        createFinding({ kind: "layout", severity: "high", mismatchPixels: 110 }),
+        createFinding({ kind: "layout", severity: "medium", mismatchPixels: 100 }),
+        createFinding({ kind: "layout", severity: "medium", mismatchPixels: 90 }),
+      ],
+    });
+
+    expect(decision.recommendation).toBe("retry_fix");
+    expect(decision.decisionTrace).toContainEqual(
+      expect.objectContaining({
+        code: "layout_global_drift",
+        outcome: "retry_fix",
+      }),
+    );
+    expect(decision.decisionTrace).toContainEqual(
+      expect.objectContaining({
+        code: "pixel_retry_range",
+        outcome: "retry_fix",
+      }),
+    );
+    expect(decision.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
   });
 
   test("keeps localized color mismatch in retry_fix rather than human review", () => {
@@ -1021,25 +1105,28 @@ describe("buildSummaryReport", () => {
     ];
     const summary = buildSummaryReport({
       baseDecision: createDecision({
-        recommendation: "needs_human_review",
+        recommendation: "retry_fix",
         severity: "high",
-        reason: "Setup or rendering issues were detected.",
+        reason:
+          "Run a sanity check to confirm the preview and reference depict the same target before fixing; capture crop was detected.",
         decisionTrace: [
           createDecisionTrace({
             axis: "setup_capture_risk",
             code: "setup_capture_signal_risk",
-            outcome: "needs_human_review",
+            outcome: "retry_fix",
             strength: "high",
-            reason: "Capture appears cropped.",
+            reason:
+              "Run a sanity check to confirm the preview and reference depict the same target before fixing; capture crop was detected.",
             findingIds: [findingId],
             signalCodes: ["possible_capture_crop"],
           }),
           createDecisionTrace({
             axis: "final",
-            code: "final_needs_human_review",
-            outcome: "needs_human_review",
+            code: "final_retry_fix",
+            outcome: "retry_fix",
             strength: "high",
-            reason: "Setup or rendering issues were detected.",
+            reason:
+              "Run a sanity check to confirm the preview and reference depict the same target before fixing; capture crop was detected.",
             findingIds: [findingId],
             signalCodes: ["possible_capture_crop"],
           }),
@@ -1056,11 +1143,14 @@ describe("buildSummaryReport", () => {
       "text-wrap-regression",
     ]);
     expect(summary.topActions.map((action) => action.code)).toEqual([
+      "run_sanity_check_same_target",
       "recapture_with_broader_scope",
       "fix_text_overflow",
     ]);
+    expect(summary.agentChecks[0]?.code).toBe("validate_same_target_before_fix");
     expect(summary.safeToAutofix).toBe(false);
-    expect(summary.requiresRecapture).toBe(true);
+    expect(summary.requiresRecapture).toBe(false);
+    expect(summary.requiresSanityCheck).toBe(true);
   });
 
   test("groups visible and omitted findings into the same primary blocker", () => {
@@ -1129,6 +1219,33 @@ describe("buildSummaryReport", () => {
     expect(summary.requiresRecapture).toBe(true);
     expect(summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
     expect(summary.overallConfidence).toBe(0.85);
+  });
+
+  test("classifies artifact write failures as output path problems instead of preview setup", () => {
+    const summary = buildSummaryReport({
+      baseDecision: createDecision({
+        recommendation: "needs_human_review",
+        severity: "medium",
+        reason: "Failed to write PNG artifact: /tmp/peye/out/diff.png",
+      }),
+      findings: [],
+      fullFindings: [],
+      analysisMode: "dom-elements",
+      omittedFindings: 0,
+      error: {
+        code: "artifact_write_failed",
+        message: "Failed to write PNG artifact: /tmp/peye/out/diff.png",
+        exitCode: 1,
+      },
+      failureOrigin: "unknown",
+    });
+
+    expect(summary.primaryBlockers[0]?.rootCauseGroupId).toBe("output-write-error");
+    expect(summary.topActions[0]?.code).toBe("fix_output_path_or_permissions");
+    expect(summary.safeToAutofix).toBe(false);
+    expect(summary.requiresRecapture).toBe(false);
+    expect(summary.decisionTrace.map((trace) => trace.axis)).toEqual(["final"]);
+    expect(summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
   });
 
   test("reduces overall confidence for visual-cluster findings when findings are omitted", () => {

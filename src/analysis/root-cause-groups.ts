@@ -18,6 +18,7 @@ export const ROOT_CAUSE_GROUP_REASONS: Record<RootCauseGroupId, string> = {
   "rendering-drift": "Fine-grained rendering drift appears to be the primary blocker.",
   "preview-setup-error": "The preview input or browser capture failed before comparison.",
   "reference-setup-error": "The reference input or acquisition failed before comparison.",
+  "output-write-error": "Writing output artifacts failed after comparison completed.",
 };
 
 export function rootCauseGroupIdForFinding(
@@ -58,8 +59,13 @@ export function rootCauseGroupIdForFinding(
 }
 
 export function rootCauseGroupIdForFailureOrigin(
+  errorCode: string,
   failureOrigin: "preview" | "reference" | "unknown",
 ): RootCauseGroupId {
+  if (errorCode === "artifact_write_failed") {
+    return "output-write-error";
+  }
+
   return failureOrigin === "reference" ? "reference-setup-error" : "preview-setup-error";
 }
 

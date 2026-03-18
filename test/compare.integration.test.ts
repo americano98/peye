@@ -697,10 +697,11 @@ describe("runCompare integration", () => {
           "Element bounds were clipped by the preview capture on the right edge(s); check selector scope and capture framing.",
       });
       expect(buttonFinding?.context?.semantic?.captureClippedEdges).toEqual(["right"]);
-      expect(result.report.summary.topActions[0]?.code).toBe("recapture_with_broader_scope");
+      expect(result.report.summary.topActions[0]?.code).toBe("run_sanity_check_same_target");
       expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
       expect(result.report.summary.safeToAutofix).toBe(false);
-      expect(result.report.summary.requiresRecapture).toBe(true);
+      expect(result.report.summary.requiresRecapture).toBe(false);
+      expect(result.report.summary.requiresSanityCheck).toBe(true);
     } finally {
       await server.close();
     }
@@ -772,7 +773,8 @@ describe("runCompare integration", () => {
       expect(result.report.error).toBeNull();
       expect(result.exitCode).toBe(3);
       expect(result.report.summary.recommendation).toBe("needs_human_review");
-      expect(result.report.summary.requiresRecapture).toBe(true);
+      expect(result.report.summary.requiresRecapture).toBe(false);
+      expect(result.report.summary.requiresSanityCheck).toBe(true);
       expect(result.report.findings).toHaveLength(1);
       expect(result.report.findings[0]?.source).toBe("visual-cluster");
       expect(result.report.findings[0]?.kind).toBe("dimension");
@@ -783,7 +785,7 @@ describe("runCompare integration", () => {
         message:
           "Dimension mismatch reaches the right, bottom, and left edge(s) of the comparison canvas; verify viewport, selected frame, and capture target.",
       });
-      expect(result.report.summary.topActions[0]?.code).toBe("verify_viewport_or_reference");
+      expect(result.report.summary.topActions[0]?.code).toBe("run_sanity_check_same_target");
       expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
       expect(result.report.images).toEqual({
         preview: { width: 120, height: 60 },
@@ -1223,7 +1225,7 @@ describe("runCompare integration", () => {
     ).toBe(false);
   });
 
-  test("returns needs_human_review for global layout drift without recapture", async () => {
+  test("returns retry_fix for global layout drift without recapture", async () => {
     const dir = await createTempDir("peye-layout-global");
     const previewPath = path.join(dir, "preview.png");
     const referencePath = path.join(dir, "reference.png");
@@ -1263,12 +1265,12 @@ describe("runCompare integration", () => {
       }),
     );
 
-    expect(result.report.summary.recommendation).toBe("needs_human_review");
-    expect(result.exitCode).toBe(3);
+    expect(result.report.summary.recommendation).toBe("retry_fix");
+    expect(result.exitCode).toBe(2);
     expect(
       result.report.summary.decisionTrace.some((trace) => trace.code === "layout_global_drift"),
     ).toBe(true);
-    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
     expect(result.report.summary.requiresRecapture).toBe(false);
   });
 
@@ -1303,10 +1305,11 @@ describe("runCompare integration", () => {
     expect(result.exitCode).toBe(3);
     expect(result.report.findings).toHaveLength(1);
     expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
-    expect(result.report.summary.topActions[0]?.code).toBe("verify_viewport_or_reference");
+    expect(result.report.summary.topActions[0]?.code).toBe("run_sanity_check_same_target");
     expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
     expect(result.report.summary.safeToAutofix).toBe(false);
-    expect(result.report.summary.requiresRecapture).toBe(true);
+    expect(result.report.summary.requiresRecapture).toBe(false);
+    expect(result.report.summary.requiresSanityCheck).toBe(true);
     expect(result.report.findings[0]?.kind).toBe("dimension");
     expect(result.report.findings[0]?.code).toBe("viewport_mismatch");
     expect(result.report.findings[0]?.fixHint).toContain("Verify viewport");
@@ -1367,6 +1370,13 @@ describe("runCompare integration", () => {
     const reportBuffer = await readFile(result.report.artifacts.report);
 
     expect(result.report.analysisMode).toBe("visual-clusters");
+    expect(result.report.summary.recommendation).toBe("retry_fix");
+    expect(
+      result.report.summary.decisionTrace.some(
+        (trace) => trace.code === "fixability_diffuse_or_unaddressable",
+      ),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
     expect(result.report.rollups.rawRegionCount).toBe(100);
     expect(result.report.metrics.findingsCount).toBe(100);
     expect(result.report.findings).toHaveLength(19);

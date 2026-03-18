@@ -13,6 +13,7 @@ import {
   type RootCauseCode,
   type RootCauseGroupId,
   type Severity,
+  type SummaryAgentCheckReport,
   type SummaryActionCode,
   type SummaryActionReport,
   type SummaryReport,
@@ -69,6 +70,7 @@ const ROOT_CAUSE_REASONS: Record<RootCauseCode, string> = {
   preview_input_or_runtime_error: "The preview input or browser capture failed before comparison.",
   reference_input_or_acquisition_error:
     "The reference input or Figma acquisition failed before comparison.",
+  artifact_output_failure: "Writing output artifacts failed after comparison completed.",
 };
 
 const ACTION_REASONS: Record<SummaryActionCode, string> = {
@@ -77,10 +79,14 @@ const ACTION_REASONS: Record<SummaryActionCode, string> = {
   fix_visual_styles: "Fix visual styling drift.",
   verify_missing_or_extra_content:
     "Verify the target content and frame, then fix missing or extra UI.",
+  run_sanity_check_same_target:
+    "Check whether preview and reference depict the same UI target before applying fixes.",
   recapture_with_broader_scope: "Recapture with a broader selector scope or viewport.",
   verify_viewport_or_reference: "Verify viewport, selected frame, and capture target.",
   fix_preview_setup: "Fix the preview input or capture environment.",
   fix_reference_setup: "Fix the reference input or acquisition setup.",
+  fix_output_path_or_permissions:
+    "Fix the output path, filesystem permissions, or available disk space.",
 };
 
 const FINDING_TO_ROOT_CAUSES: Record<FindingCode, RootCauseCode[]> = {
@@ -110,6 +116,7 @@ const ROOT_CAUSE_TO_ACTION: Record<RootCauseCode, SummaryActionCode> = {
   rendering_drift: "fix_visual_styles",
   preview_input_or_runtime_error: "fix_preview_setup",
   reference_input_or_acquisition_error: "fix_reference_setup",
+  artifact_output_failure: "fix_output_path_or_permissions",
 };
 
 export function buildSummaryReport(params: {
@@ -136,9 +143,12 @@ export function buildSummaryReport(params: {
     fallbackSeverity: params.baseDecision.severity,
   });
   const topActions = buildTopActions(rootCauseCandidates, findingOrder);
-  const limitedTopActions = topActions
-    .slice(0, 3)
-    .map(({ highestSeverity: _highestSeverity, ...action }) => action);
+  const agentChecks = buildAgentChecks(decisionTrace);
+  const requiresSanityCheck = agentChecks.length > 0;
+  const limitedTopActions = prependSanityCheckAction(
+    topActions.slice(0, 3).map(({ highestSeverity: _highestSeverity, ...action }) => action),
+    agentChecks,
+  ).slice(0, 3);
   const primaryBlockers = buildPrimaryBlockers({
     emittedFindings: params.findings,
     fullFindings: params.fullFindings,
@@ -147,11 +157,13 @@ export function buildSummaryReport(params: {
     fallbackSeverity: params.baseDecision.severity,
   });
   const requiresRecapture =
-    params.error !== null || decisionTrace.some((trace) => trace.axis === "setup_capture_risk");
+    (params.error !== null && !isOutputFailure(params.error.code)) ||
+    decisionTrace.some((trace) => trace.code === "setup_ignored_area_risk");
   const safeToAutofix = canSafelyAutofix({
     recommendation: params.baseDecision.recommendation,
     error: params.error,
     requiresRecapture,
+    requiresSanityCheck,
     topActions: limitedTopActions,
     findings: params.findings,
   });
@@ -162,6 +174,7 @@ export function buildSummaryReport(params: {
     reason: decisionTrace.at(-1)?.reason ?? params.baseDecision.reason,
     decisionTrace,
     topActions: limitedTopActions,
+    agentChecks,
     primaryBlockers,
     overallConfidence: buildOverallConfidence({
       recommendation: params.baseDecision.recommendation,
@@ -171,7 +184,49 @@ export function buildSummaryReport(params: {
     }),
     safeToAutofix,
     requiresRecapture,
+    requiresSanityCheck,
   };
+}
+
+function buildAgentChecks(decisionTrace: DecisionTraceReport[]): SummaryAgentCheckReport[] {
+  const setupSignalTrace = decisionTrace.find(
+    (trace) => trace.code === "setup_capture_signal_risk",
+  );
+
+  if (!setupSignalTrace || setupSignalTrace.outcome !== "retry_fix") {
+    return [];
+  }
+
+  return [
+    {
+      code: "validate_same_target_before_fix",
+      confidence: candidateConfidenceForDecisionStrength(setupSignalTrace.strength),
+      reason: setupSignalTrace.reason,
+      findingIds: [...setupSignalTrace.findingIds],
+      signalCodes: [...setupSignalTrace.signalCodes],
+    },
+  ];
+}
+
+function prependSanityCheckAction(
+  actions: SummaryActionReport[],
+  agentChecks: SummaryAgentCheckReport[],
+): SummaryActionReport[] {
+  const firstCheck = agentChecks[0];
+
+  if (!firstCheck) {
+    return actions;
+  }
+
+  return [
+    {
+      code: "run_sanity_check_same_target",
+      confidence: firstCheck.confidence,
+      reason: ACTION_REASONS.run_sanity_check_same_target,
+      findingIds: [...firstCheck.findingIds],
+    },
+    ...actions,
+  ];
 }
 
 function normalizeDecisionTrace(params: {
@@ -206,6 +261,10 @@ function buildSyntheticFailureAxisTrace(
   failureOrigin: FailureOrigin,
 ): DecisionTraceReport | null {
   if (failureOrigin === "reference") {
+    return null;
+  }
+
+  if (isOutputFailure(error.code)) {
     return null;
   }
 
@@ -286,7 +345,10 @@ function buildPrimaryBlockers(params: {
   fallbackSeverity: Severity;
 }): PrimaryBlockerReport[] {
   if (params.error) {
-    const rootCauseGroupId = rootCauseGroupIdForFailureOrigin(params.failureOrigin ?? "unknown");
+    const rootCauseGroupId = rootCauseGroupIdForFailureOrigin(
+      params.error.code,
+      params.failureOrigin ?? "unknown",
+    );
     const confidence = (params.failureOrigin ?? "unknown") === "unknown" ? 0.9 : 0.95;
 
     return [
@@ -595,6 +657,10 @@ function mergeRootCauseCandidates(
 }
 
 function classifyFailureRootCause(errorCode: string, failureOrigin: FailureOrigin): RootCauseCode {
+  if (isOutputFailure(errorCode)) {
+    return "artifact_output_failure";
+  }
+
   if (
     errorCode.startsWith("preview_") ||
     errorCode.startsWith("playwright_") ||
@@ -611,11 +677,7 @@ function classifyFailureRootCause(errorCode: string, failureOrigin: FailureOrigi
     return "reference_input_or_acquisition_error";
   }
 
-  if (
-    errorCode.startsWith("input_file_") ||
-    errorCode.startsWith("image_") ||
-    errorCode === "artifact_write_failed"
-  ) {
+  if (errorCode.startsWith("input_file_") || errorCode.startsWith("image_")) {
     return failureOrigin === "reference"
       ? "reference_input_or_acquisition_error"
       : "preview_input_or_runtime_error";
@@ -626,14 +688,24 @@ function classifyFailureRootCause(errorCode: string, failureOrigin: FailureOrigi
     : "preview_input_or_runtime_error";
 }
 
+function isOutputFailure(errorCode: string): boolean {
+  return errorCode === "artifact_write_failed";
+}
+
 function canSafelyAutofix(params: {
   recommendation: Recommendation;
   error: ErrorReport | null;
   requiresRecapture: boolean;
+  requiresSanityCheck: boolean;
   topActions: SummaryActionReport[];
   findings: FindingReport[];
 }): boolean {
-  if (params.recommendation !== "retry_fix" || params.error !== null || params.requiresRecapture) {
+  if (
+    params.recommendation !== "retry_fix" ||
+    params.error !== null ||
+    params.requiresRecapture ||
+    params.requiresSanityCheck
+  ) {
     return false;
   }
 
