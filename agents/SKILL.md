@@ -21,10 +21,11 @@ Use `peye` when an agent needs to:
 ## Agent Stance
 
 - Treat `report.json` as the primary result.
-- Trust `summary.decisionTrace`, `summary.topActions`, `summary.rootCauseCandidates`, `summary.safeToAutofix`, `summary.requiresRecapture`, `error.code`, and `findings` more than your visual guess from the PNGs.
+- Trust `summary.decisionTrace`, `summary.topActions`, `summary.primaryBlockers`, `summary.safeToAutofix`, `summary.requiresRecapture`, `error.code`, `findings`, and `rollups` more than your visual guess from the PNGs.
 - Use `heatmap.png`, `overlay.png`, and `diff.png` as supporting evidence, not the main contract.
 - If `recommendation` is `retry_fix` and the agent is actively implementing that UI, the default action is to try to improve the implementation and rerun.
 - If `recommendation` is `needs_human_review`, do not keep auto-tuning blindly. First verify setup: viewport, selector, reference target, and capture scope.
+- Remember that `findings` is intentionally capped to the top detailed mismatches. Use `summary.primaryBlockers` and omitted-tail rollups to understand the full problem before deciding that the issue is localized.
 
 ## Minimal Workflow
 
@@ -141,7 +142,7 @@ Read these first:
 - `summary.recommendation`
 - `summary.decisionTrace`
 - `summary.topActions`
-- `summary.rootCauseCandidates`
+- `summary.primaryBlockers`
 - `summary.safeToAutofix`
 - `summary.requiresRecapture`
 - `error`
@@ -160,12 +161,21 @@ Use these fields for diagnosis:
 - `metrics.ignoredPixels` and `metrics.ignoredPercent`: excluded area from `--ignore-selector`
 - `metrics.structuralMismatchPercent`: layout-sensitive drift
 - `summary.decisionTrace[]`: fixed-order explanation of which matrix rules fired and why
-- `findings[]`: main actionable mismatches
+- `summary.primaryBlockers[]`: report-level diagnostic grouping across both visible findings and omitted tail
+- `summary.primaryBlockers[0].rootCauseGroupId`: the best compact statement of the main blocker
+- `findings[]`: top detailed actionable mismatches
+- `findings[].id`: stable across reruns for the same normalized issue, so agents can correlate iterations
 - `findings[].code`: stable mismatch taxonomy
+- `findings[].rootCauseGroupId`: diagnostic grouping for that specific finding
 - `findings[].fixHint`: short next-step hint
 - `findings[].actionTarget.selector`: the likely DOM target in URL mode
 - `findings[].signals[].code`: stable automation hint
 - `findings[].evidenceRefs`: links back to the supporting signals, metrics, hotspots, and artifacts
+- `rollups.omittedFindings`: how many detailed findings were not emitted
+- `rollups.omittedBySeverity` and `rollups.omittedByKind`: whether the hidden tail is mostly low-noise or still meaningful
+- `rollups.topOmittedSelectors`: repeated DOM targets hidden by truncation
+- `rollups.largestOmittedRegions`: the biggest omitted regions with `bbox`, `kind`, `severity`, `rootCauseGroupId`, and optional selector
+- `rollups.tailAreaPercent`: how much canvas mismatch is hidden in the omitted tail
 
 If `inputs.preview.ignoreSelectors[].matchedElementCount` is `0`, that ignore rule did nothing in the current capture.
 
@@ -185,9 +195,11 @@ When using `peye` during implementation:
    - missing ignore selector for obvious page noise
 4. If `summary.requiresRecapture` is `true`, fix setup or recapture before changing implementation code.
 5. If setup is sound, read `summary.decisionTrace[0]` to understand why the matrix chose the current verdict.
-6. If setup is sound and `summary.topActions[0]` points at a concrete DOM target, use that as the default next fix.
-7. Rerun `peye` into the same cleaned scratch directory.
-8. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
+6. Read `summary.primaryBlockers[0]` before changing code. Use it to decide whether the run is dominated by text wrapping, viewport/crop risk, container sizing, layout displacement, or style drift.
+7. If setup is sound and `summary.topActions[0]` points at a concrete DOM target, use that as the default next fix.
+8. If `findings` looks small but `rollups.omittedFindings > 0` or `rollups.tailAreaPercent` is still substantial, treat the issue as broader than the visible top-N details.
+9. Rerun `peye` into the same cleaned scratch directory.
+10. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
 
 Do not keep editing forever on a `needs_human_review` result unless the cause is clearly understood.
 

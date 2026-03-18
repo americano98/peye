@@ -208,16 +208,17 @@ peye compare \
 
 - `analysisMode` is `dom-elements` for URL captures and `visual-clusters` for local image inputs
 - `summary.decisionTrace` shows which matrix rules fired, in fixed axis order, and why they pushed the recommendation
-- `summary.topActions` and `summary.rootCauseCandidates` turn the report into a decision object instead of a diff-only payload
+- `summary.topActions` and `summary.primaryBlockers` turn the report into a decision object instead of a diff-only payload
 - `summary.safeToAutofix` and `summary.requiresRecapture` let an agent choose between patching code, fixing setup, or stopping early
 - `images` preserves normalized preview, reference, and padded canvas dimensions for fast debugging
 - `inputs.preview.ignoreSelectors` records requested ignore selectors and how many visible elements actually intersected the capture area
 - `findings` is capped to the top actionable mismatches
+- `findings[].id` is stable across reruns for the same normalized issue, and `findings[].rootCauseGroupId` ties each symptom back to a diagnostic blocker
 - `findings[].code`, `findings[].fixHint`, `findings[].likelyAffectedProperties`, and `findings[].actionTarget` expose stable next-step metadata
 - `findings[].signals` adds stable heuristic hints such as probable text clipping, capture crop, and viewport mismatch
 - `findings[].evidenceRefs` points back to the exact signals, metrics, hotspots, and artifacts that support each finding
 - `findings[].hotspots` exposes the top mismatch subregions without forcing the caller to inspect images first
-- `rollups.rawRegionCount` preserves the internal mismatch count without emitting every low-level region
+- `rollups.rawRegionCount` preserves the internal mismatch count without emitting every low-level region, while omitted-tail aggregates keep the non-emitted findings diagnosable
 - `error` is `null` on successful comparisons and contains a stable `code`, `message`, and `exitCode` for failure reports
 
 ## Automation
@@ -253,7 +254,7 @@ Example `report.json` shape:
         "outcome": "retry_fix",
         "strength": "medium",
         "reason": "Color or style drift appears localized to a small set of findings and is likely fixable.",
-        "findingIds": ["finding-001"],
+        "findingIds": ["finding-2e0f1e7f5f9d"],
         "signalCodes": ["probable_text_clipping"],
         "metricKeys": ["meanColorDelta", "maxColorDelta"]
       },
@@ -263,7 +264,7 @@ Example `report.json` shape:
         "outcome": "retry_fix",
         "strength": "high",
         "reason": "The dominant findings are concentrated and actionable enough for another automated fix attempt.",
-        "findingIds": ["finding-001"],
+        "findingIds": ["finding-2e0f1e7f5f9d"],
         "signalCodes": ["probable_text_clipping"],
         "metricKeys": ["mismatchPercent"]
       },
@@ -273,7 +274,7 @@ Example `report.json` shape:
         "outcome": "retry_fix",
         "strength": "high",
         "reason": "Mismatch is 3.21%; localized, fixable issues were detected and should be corrected before retrying.",
-        "findingIds": ["finding-001"],
+        "findingIds": ["finding-2e0f1e7f5f9d"],
         "signalCodes": ["probable_text_clipping"],
         "metricKeys": ["mismatchPercent"]
       }
@@ -283,16 +284,21 @@ Example `report.json` shape:
         "code": "fix_text_overflow",
         "confidence": 0.84,
         "reason": "Fix text overflow, line clamp, or available width.",
-        "findingIds": ["finding-001"]
+        "findingIds": ["finding-2e0f1e7f5f9d"]
       }
     ],
-    "rootCauseCandidates": [
+    "primaryBlockers": [
       {
-        "code": "text_overflow",
+        "rootCauseGroupId": "text-wrap-regression",
+        "severity": "medium",
         "confidence": 0.84,
-        "reason": "Text appears clipped inside the affected element.",
-        "findingIds": ["finding-001"],
-        "signalCodes": ["probable_text_clipping"]
+        "reason": "Text content appears to wrap, clamp, or overflow differently than the reference.",
+        "findingCount": 1,
+        "omittedFindingCount": 0,
+        "sampleFindingIds": ["finding-2e0f1e7f5f9d"],
+        "signalCodes": ["probable_text_clipping"],
+        "topSelectors": ["section#hero > button#cta"],
+        "affectedAreaPercent": 1.54
       }
     ],
     "overallConfidence": 0.85,
@@ -359,11 +365,17 @@ Example `report.json` shape:
     "rawRegionCount": 18,
     "findingsCount": 2,
     "affectedElementCount": 2,
-    "omittedFindings": 0
+    "omittedFindings": 0,
+    "omittedBySeverity": [],
+    "omittedByKind": [],
+    "topOmittedSelectors": [],
+    "largestOmittedRegions": [],
+    "tailAreaPercent": 0
   },
   "findings": [
     {
-      "id": "finding-001",
+      "id": "finding-2e0f1e7f5f9d",
+      "rootCauseGroupId": "text-wrap-regression",
       "source": "dom-element",
       "kind": "mixed",
       "code": "text_clipping",
@@ -467,13 +479,18 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
         "findingIds": []
       }
     ],
-    "rootCauseCandidates": [
+    "primaryBlockers": [
       {
-        "code": "preview_input_or_runtime_error",
+        "rootCauseGroupId": "preview-setup-error",
+        "severity": "medium",
         "confidence": 0.95,
         "reason": "The preview input or browser capture failed before comparison.",
-        "findingIds": [],
-        "signalCodes": []
+        "findingCount": 0,
+        "omittedFindingCount": 0,
+        "sampleFindingIds": [],
+        "signalCodes": [],
+        "topSelectors": [],
+        "affectedAreaPercent": 0
       }
     ],
     "overallConfidence": 0.72,
@@ -488,7 +505,7 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 }
 ```
 
-For automation, prefer `summary.decisionTrace[0]`, `summary.topActions[0]`, `summary.rootCauseCandidates[0]`, `summary.safeToAutofix`, `summary.requiresRecapture`, `findings[].code`, `findings[].fixHint`, and `findings[].actionTarget` before falling back to `summary.reason`.
+For automation, prefer `summary.decisionTrace[0]`, `summary.topActions[0]`, `summary.primaryBlockers[0]`, `summary.safeToAutofix`, `summary.requiresRecapture`, `findings[].code`, `findings[].fixHint`, and `findings[].actionTarget` before falling back to `summary.reason`.
 
 ## Exit Codes
 

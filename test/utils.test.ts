@@ -1,9 +1,20 @@
+import { buildFindingsAnalysis } from "../src/analysis/findings.js";
 import { describe, expect, test } from "vitest";
 import { decideRecommendation } from "../src/analysis/recommendation.js";
 import { buildSummaryReport } from "../src/analysis/summary.js";
 import { parseReferenceInput } from "../src/io/inputs.js";
-import type { RecommendationDecision } from "../src/types/internal.js";
-import type { DecisionTraceReport, FindingReport, MetricsReport } from "../src/types/report.js";
+import type {
+  ComparisonRegion,
+  DomSnapshot,
+  RecommendationDecision,
+} from "../src/types/internal.js";
+import type {
+  DecisionTraceReport,
+  FindingReport,
+  FindingSignalReport,
+  MetricsReport,
+  RootCauseGroupId,
+} from "../src/types/report.js";
 import { parseViewport } from "../src/utils/viewport.js";
 import { hashToSelector, parseFigmaUrl } from "../src/utils/url.js";
 
@@ -32,11 +43,17 @@ function createMetrics(
 function createFinding(
   overrides: Partial<FindingReport> & Pick<FindingReport, "kind" | "severity">,
 ): FindingReport {
+  const code = overrides.code ?? "rendering_mismatch";
+  const signals = overrides.signals ?? [];
+
   return {
-    id: overrides.id ?? "finding-001",
+    id: overrides.id ?? "finding-test-001",
+    rootCauseGroupId:
+      overrides.rootCauseGroupId ??
+      rootCauseGroupIdForTestFinding(code, signals, overrides.element),
     source: overrides.source ?? "visual-cluster",
     kind: overrides.kind,
-    code: overrides.code ?? "rendering_mismatch",
+    code,
     severity: overrides.severity,
     confidence: overrides.confidence ?? 0.5,
     summary: overrides.summary ?? "Finding summary",
@@ -52,12 +69,51 @@ function createFinding(
     mismatchPercentOfCanvas: overrides.mismatchPercentOfCanvas ?? 0.2,
     issueTypes: overrides.issueTypes ?? ["style"],
     likelyAffectedProperties: overrides.likelyAffectedProperties ?? ["style.typography"],
-    signals: overrides.signals ?? [],
+    signals,
     evidenceRefs: overrides.evidenceRefs ?? [],
     hotspots: overrides.hotspots ?? [],
     actionTarget: overrides.actionTarget ?? null,
     element: overrides.element ?? null,
   };
+}
+
+function rootCauseGroupIdForTestFinding(
+  code: FindingReport["code"],
+  signals: FindingSignalReport[],
+  element: FindingReport["element"] | undefined,
+): RootCauseGroupId {
+  const signalCodes = new Set(signals.map((signal) => signal.code));
+
+  if (code === "text_clipping" || signalCodes.has("probable_text_clipping")) {
+    return "text-wrap-regression";
+  }
+
+  if (
+    code === "capture_crop" ||
+    code === "viewport_mismatch" ||
+    signalCodes.has("possible_capture_crop") ||
+    signalCodes.has("possible_viewport_mismatch")
+  ) {
+    return "viewport-crop-risk";
+  }
+
+  if (code === "missing_or_extra_content" && element) {
+    return "container-size-mismatch";
+  }
+
+  if (code === "missing_or_extra_content") {
+    return "content-presence-mismatch";
+  }
+
+  if (code === "layout_mismatch" || code === "layout_style_mismatch") {
+    return "layout-displacement";
+  }
+
+  if (code === "style_mismatch") {
+    return "visual-style-drift";
+  }
+
+  return "rendering-drift";
 }
 
 function createDecisionTrace(
@@ -405,8 +461,180 @@ describe("decideRecommendation", () => {
   });
 });
 
+function createRegion(
+  overrides: Partial<ComparisonRegion> & Pick<ComparisonRegion, "x" | "y" | "width" | "height">,
+): ComparisonRegion {
+  return {
+    x: overrides.x,
+    y: overrides.y,
+    width: overrides.width,
+    height: overrides.height,
+    pixelCount: overrides.pixelCount ?? overrides.width * overrides.height,
+    mismatchPercent: overrides.mismatchPercent ?? 100,
+    kind: overrides.kind ?? "pixel",
+    severity: overrides.severity ?? "low",
+  };
+}
+
+function createDomSnapshotForTest(
+  elementOverrides: Partial<DomSnapshot["elements"][number]> = {},
+): DomSnapshot {
+  return {
+    root: {
+      id: "root",
+      tag: "main",
+      selector: "#root",
+      role: null,
+      textSnippet: null,
+      bbox: {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 60,
+      },
+      depth: 0,
+      captureClippedEdges: [],
+      textMetrics: null,
+    },
+    elements: [
+      {
+        id: "cta",
+        tag: "button",
+        selector: "section#hero > button#cta",
+        role: "button",
+        textSnippet: "Buy now",
+        bbox: {
+          x: 8,
+          y: 8,
+          width: 40,
+          height: 18,
+        },
+        depth: 1,
+        captureClippedEdges: [],
+        textMetrics: null,
+        ...elementOverrides,
+      },
+    ],
+  };
+}
+
+describe("buildFindingsAnalysis", () => {
+  test("keeps stable finding ids across runs and input reordering", () => {
+    const rawRegions = [
+      createRegion({ x: 60, y: 12, width: 6, height: 6, pixelCount: 36 }),
+      createRegion({ x: 12, y: 12, width: 6, height: 6, pixelCount: 36 }),
+    ];
+
+    const firstRun = buildFindingsAnalysis({
+      analysisMode: "visual-clusters",
+      rawRegions,
+      domSnapshot: null,
+      width: 120,
+      height: 80,
+    });
+    const secondRun = buildFindingsAnalysis({
+      analysisMode: "visual-clusters",
+      rawRegions: [...rawRegions].reverse(),
+      domSnapshot: null,
+      width: 120,
+      height: 80,
+    });
+
+    expect(firstRun.findings.map((finding) => finding.id)).toEqual(
+      secondRun.findings.map((finding) => finding.id),
+    );
+  });
+
+  test("assigns different stable ids to different findings with the same severity band", () => {
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "visual-clusters",
+      rawRegions: [
+        createRegion({ x: 12, y: 12, width: 6, height: 6, pixelCount: 36 }),
+        createRegion({ x: 60, y: 12, width: 6, height: 6, pixelCount: 36 }),
+      ],
+      domSnapshot: null,
+      width: 120,
+      height: 80,
+    });
+
+    expect(analysis.findings).toHaveLength(2);
+    expect(analysis.findings[0]?.id).not.toBe(analysis.findings[1]?.id);
+  });
+
+  test("applies deterministic suffixes when stable finding hashes collide", () => {
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "visual-clusters",
+      rawRegions: [
+        createRegion({ x: 100, y: 2, width: 1, height: 1, pixelCount: 1 }),
+        createRegion({ x: 118, y: 2, width: 1, height: 1, pixelCount: 1 }),
+      ],
+      domSnapshot: null,
+      width: 400_000,
+      height: 20,
+    });
+
+    expect(analysis.findings).toHaveLength(2);
+    expect(analysis.findings[0]?.id).toMatch(/^finding-[0-9a-f]{12}$/);
+    expect(analysis.findings[1]?.id).toBe(`${analysis.findings[0]?.id}-02`);
+  });
+
+  test("uses text wrapping as the root cause group when text clipping and capture crop signals coexist", () => {
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({ x: 10, y: 10, width: 20, height: 8, pixelCount: 160, severity: "medium" }),
+      ],
+      domSnapshot: createDomSnapshotForTest({
+        captureClippedEdges: ["right"],
+        textMetrics: {
+          clientWidth: 40,
+          clientHeight: 18,
+          scrollWidth: 52,
+          scrollHeight: 18,
+          overflowX: "hidden",
+          overflowY: "visible",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          lineClamp: null,
+        },
+      }),
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.signals.map((signal) => signal.code)).toEqual([
+      "probable_text_clipping",
+      "possible_capture_crop",
+    ]);
+    expect(analysis.findings[0]?.rootCauseGroupId).toBe("text-wrap-regression");
+  });
+});
+
 describe("buildSummaryReport", () => {
   test("derives an autofixable text overflow action from DOM findings", () => {
+    const findingId = "finding-text-a";
+    const findings = [
+      createFinding({
+        id: findingId,
+        kind: "pixel",
+        severity: "medium",
+        code: "text_clipping",
+        confidence: 0.8,
+        signals: [
+          {
+            code: "probable_text_clipping",
+            confidence: "medium",
+            message: "Text is clipped.",
+          },
+        ],
+        actionTarget: {
+          selector: "section#hero > button#cta",
+          tag: "button",
+          role: null,
+          textSnippet: "Buy",
+        },
+      }),
+    ];
     const summary = buildSummaryReport({
       baseDecision: createDecision({
         recommendation: "retry_fix",
@@ -419,7 +647,7 @@ describe("buildSummaryReport", () => {
             outcome: "retry_fix",
             strength: "high",
             reason: "Top findings are concentrated and actionable.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
           }),
           createDecisionTrace({
             axis: "final",
@@ -427,39 +655,20 @@ describe("buildSummaryReport", () => {
             outcome: "retry_fix",
             strength: "high",
             reason: "Localized issues were detected.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
           }),
         ],
       }),
-      findings: [
-        createFinding({
-          kind: "pixel",
-          severity: "medium",
-          code: "text_clipping",
-          confidence: 0.8,
-          signals: [
-            {
-              code: "probable_text_clipping",
-              confidence: "medium",
-              message: "Text is clipped.",
-            },
-          ],
-          actionTarget: {
-            selector: "section#hero > button#cta",
-            tag: "button",
-            role: null,
-            textSnippet: "Buy",
-          },
-        }),
-      ],
+      findings,
+      fullFindings: findings,
       analysisMode: "dom-elements",
       omittedFindings: 0,
       error: null,
     });
 
-    expect(summary.rootCauseCandidates[0]?.code).toBe("text_overflow");
+    expect(summary.primaryBlockers[0]?.rootCauseGroupId).toBe("text-wrap-regression");
     expect(summary.topActions[0]?.code).toBe("fix_text_overflow");
-    expect(summary.topActions[0]?.findingIds).toEqual(["finding-001"]);
+    expect(summary.topActions[0]?.findingIds).toEqual([findingId]);
     expect(summary.safeToAutofix).toBe(true);
     expect(summary.requiresRecapture).toBe(false);
     expect(summary.decisionTrace.map((trace) => trace.code)).toEqual([
@@ -470,45 +679,75 @@ describe("buildSummaryReport", () => {
   });
 
   test("keeps root causes and actions in stable order when mixed findings map to multiple causes", () => {
+    const findings = [
+      createFinding({
+        id: "finding-mixed-a",
+        kind: "mixed",
+        severity: "high",
+        code: "layout_style_mismatch",
+        confidence: 0.77,
+      }),
+      createFinding({
+        id: "finding-color-b",
+        kind: "color",
+        severity: "medium",
+        code: "style_mismatch",
+        confidence: 0.77,
+      }),
+    ];
     const summary = buildSummaryReport({
       baseDecision: createDecision({
         recommendation: "retry_fix",
         severity: "high",
         reason: "Mixed layout and style issues were detected.",
       }),
-      findings: [
-        createFinding({
-          id: "finding-001",
-          kind: "mixed",
-          severity: "high",
-          code: "layout_style_mismatch",
-          confidence: 0.77,
-        }),
-        createFinding({
-          id: "finding-002",
-          kind: "color",
-          severity: "medium",
-          code: "style_mismatch",
-          confidence: 0.77,
-        }),
-      ],
+      findings,
+      fullFindings: findings,
       analysisMode: "dom-elements",
       omittedFindings: 0,
       error: null,
     });
 
-    expect(summary.rootCauseCandidates.map((candidate) => candidate.code)).toEqual([
-      "layout_displacement",
-      "visual_style_drift",
+    expect(summary.primaryBlockers.map((candidate) => candidate.rootCauseGroupId)).toEqual([
+      "layout-displacement",
+      "visual-style-drift",
     ]);
     expect(summary.topActions.map((action) => action.code)).toEqual([
       "fix_layout_styles",
       "fix_visual_styles",
     ]);
-    expect(summary.topActions[1]?.findingIds).toEqual(["finding-001", "finding-002"]);
+    expect(summary.topActions[1]?.findingIds).toEqual(["finding-mixed-a", "finding-color-b"]);
   });
 
   test("keeps signal-derived root causes even when finding code comes from another signal or kind", () => {
+    const findingId = "finding-signal-a";
+    const findings = [
+      createFinding({
+        id: findingId,
+        kind: "mixed",
+        severity: "high",
+        code: "text_clipping",
+        confidence: 0.9,
+        signals: [
+          {
+            code: "probable_text_clipping",
+            confidence: "high",
+            message: "Text is clipped.",
+          },
+          {
+            code: "possible_capture_crop",
+            confidence: "high",
+            message: "Capture appears cropped.",
+          },
+        ],
+        actionTarget: {
+          selector: "section#hero > button#cta",
+          tag: "button",
+          role: null,
+          textSnippet: "Buy",
+        },
+      }),
+    ];
     const summary = buildSummaryReport({
       baseDecision: createDecision({
         recommendation: "needs_human_review",
@@ -521,7 +760,7 @@ describe("buildSummaryReport", () => {
             outcome: "needs_human_review",
             strength: "high",
             reason: "Capture appears cropped.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
             signalCodes: ["possible_capture_crop"],
           }),
           createDecisionTrace({
@@ -530,45 +769,20 @@ describe("buildSummaryReport", () => {
             outcome: "needs_human_review",
             strength: "high",
             reason: "Setup or rendering issues were detected.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
             signalCodes: ["possible_capture_crop"],
           }),
         ],
       }),
-      findings: [
-        createFinding({
-          kind: "mixed",
-          severity: "high",
-          code: "text_clipping",
-          confidence: 0.9,
-          signals: [
-            {
-              code: "probable_text_clipping",
-              confidence: "high",
-              message: "Text is clipped.",
-            },
-            {
-              code: "possible_capture_crop",
-              confidence: "high",
-              message: "Capture appears cropped.",
-            },
-          ],
-          actionTarget: {
-            selector: "section#hero > button#cta",
-            tag: "button",
-            role: null,
-            textSnippet: "Buy",
-          },
-        }),
-      ],
+      findings,
+      fullFindings: findings,
       analysisMode: "dom-elements",
       omittedFindings: 0,
       error: null,
     });
 
-    expect(summary.rootCauseCandidates.map((candidate) => candidate.code)).toEqual([
-      "capture_scope_too_tight",
-      "text_overflow",
+    expect(summary.primaryBlockers.map((candidate) => candidate.rootCauseGroupId)).toEqual([
+      "text-wrap-regression",
     ]);
     expect(summary.topActions.map((action) => action.code)).toEqual([
       "recapture_with_broader_scope",
@@ -576,6 +790,47 @@ describe("buildSummaryReport", () => {
     ]);
     expect(summary.safeToAutofix).toBe(false);
     expect(summary.requiresRecapture).toBe(true);
+  });
+
+  test("groups visible and omitted findings into the same primary blocker", () => {
+    const emittedFinding = createFinding({
+      id: "finding-layout-visible",
+      kind: "layout",
+      severity: "high",
+      code: "layout_mismatch",
+      mismatchPercentOfCanvas: 1.2,
+      mismatchPixels: 120,
+    });
+    const omittedFinding = createFinding({
+      id: "finding-layout-omitted",
+      kind: "layout",
+      severity: "medium",
+      code: "layout_mismatch",
+      mismatchPercentOfCanvas: 0.8,
+      mismatchPixels: 80,
+    });
+    const summary = buildSummaryReport({
+      baseDecision: createDecision({
+        recommendation: "retry_fix",
+        severity: "high",
+        reason: "Layout issues were detected.",
+      }),
+      findings: [emittedFinding],
+      fullFindings: [emittedFinding, omittedFinding],
+      analysisMode: "dom-elements",
+      omittedFindings: 1,
+      error: null,
+    });
+
+    expect(summary.primaryBlockers).toEqual([
+      expect.objectContaining({
+        rootCauseGroupId: "layout-displacement",
+        findingCount: 2,
+        omittedFindingCount: 1,
+        sampleFindingIds: ["finding-layout-visible", "finding-layout-omitted"],
+        affectedAreaPercent: 2,
+      }),
+    ]);
   });
 
   test("marks reference acquisition failures as requiring recapture/setup fixes", () => {
@@ -586,6 +841,7 @@ describe("buildSummaryReport", () => {
         reason: "Figma did not return an image URL.",
       }),
       findings: [],
+      fullFindings: [],
       analysisMode: "visual-clusters",
       omittedFindings: 0,
       error: {
@@ -596,7 +852,7 @@ describe("buildSummaryReport", () => {
       failureOrigin: "reference",
     });
 
-    expect(summary.rootCauseCandidates[0]?.code).toBe("reference_input_or_acquisition_error");
+    expect(summary.primaryBlockers[0]?.rootCauseGroupId).toBe("reference-setup-error");
     expect(summary.topActions[0]?.code).toBe("fix_reference_setup");
     expect(summary.safeToAutofix).toBe(false);
     expect(summary.requiresRecapture).toBe(true);
@@ -605,6 +861,16 @@ describe("buildSummaryReport", () => {
   });
 
   test("reduces overall confidence for visual-cluster findings when findings are omitted", () => {
+    const findingId = "finding-rendering-a";
+    const findings = [
+      createFinding({
+        id: findingId,
+        kind: "pixel",
+        severity: "medium",
+        code: "rendering_mismatch",
+        confidence: 0.6,
+      }),
+    ];
     const summary = buildSummaryReport({
       baseDecision: createDecision({
         recommendation: "retry_fix",
@@ -617,7 +883,7 @@ describe("buildSummaryReport", () => {
             outcome: "retry_fix",
             strength: "high",
             reason: "Top findings are concentrated and actionable.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
           }),
           createDecisionTrace({
             axis: "final",
@@ -625,18 +891,12 @@ describe("buildSummaryReport", () => {
             outcome: "retry_fix",
             strength: "high",
             reason: "Clustered issues were detected.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
           }),
         ],
       }),
-      findings: [
-        createFinding({
-          kind: "pixel",
-          severity: "medium",
-          code: "rendering_mismatch",
-          confidence: 0.6,
-        }),
-      ],
+      findings,
+      fullFindings: findings,
       analysisMode: "visual-clusters",
       omittedFindings: 4,
       error: null,
@@ -647,6 +907,7 @@ describe("buildSummaryReport", () => {
   });
 
   test("keeps global layout drift in human review without forcing recapture", () => {
+    const findingId = "finding-layout-global";
     const summary = buildSummaryReport({
       baseDecision: createDecision({
         recommendation: "needs_human_review",
@@ -659,7 +920,7 @@ describe("buildSummaryReport", () => {
             outcome: "needs_human_review",
             strength: "high",
             reason: "Layout drift appears global rather than localized.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
           }),
           createDecisionTrace({
             axis: "final",
@@ -667,18 +928,35 @@ describe("buildSummaryReport", () => {
             outcome: "needs_human_review",
             strength: "high",
             reason: "Layout drift appears global rather than localized.",
-            findingIds: ["finding-001"],
+            findingIds: [findingId],
           }),
         ],
       }),
-      findings: [createFinding({ kind: "layout", severity: "high" })],
+      findings: [
+        createFinding({
+          id: findingId,
+          kind: "layout",
+          severity: "high",
+          code: "layout_mismatch",
+          rootCauseGroupId: "layout-displacement",
+        }),
+      ],
+      fullFindings: [
+        createFinding({
+          id: findingId,
+          kind: "layout",
+          severity: "high",
+          code: "layout_mismatch",
+          rootCauseGroupId: "layout-displacement",
+        }),
+      ],
       analysisMode: "visual-clusters",
       omittedFindings: 0,
       error: null,
     });
 
     expect(summary.requiresRecapture).toBe(false);
-    expect(summary.rootCauseCandidates[0]?.code).toBe("layout_displacement");
+    expect(summary.primaryBlockers[0]?.rootCauseGroupId).toBe("layout-displacement");
     expect(summary.decisionTrace.map((trace) => trace.code)).toEqual([
       "layout_global_drift",
       "final_needs_human_review",

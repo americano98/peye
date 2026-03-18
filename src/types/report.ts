@@ -66,6 +66,17 @@ export const ROOT_CAUSE_CODES = [
   "preview_input_or_runtime_error",
   "reference_input_or_acquisition_error",
 ] as const;
+export const ROOT_CAUSE_GROUP_IDS = [
+  "text-wrap-regression",
+  "viewport-crop-risk",
+  "container-size-mismatch",
+  "content-presence-mismatch",
+  "layout-displacement",
+  "visual-style-drift",
+  "rendering-drift",
+  "preview-setup-error",
+  "reference-setup-error",
+] as const;
 export const AFFECTED_PROPERTY_CODES = [
   "layout.position",
   "layout.spacing",
@@ -110,6 +121,7 @@ export type DecisionAxis = (typeof DECISION_AXES)[number];
 export type DecisionStrength = (typeof DECISION_STRENGTHS)[number];
 export type DecisionTraceCode = (typeof DECISION_TRACE_CODES)[number];
 export type RootCauseCode = (typeof ROOT_CAUSE_CODES)[number];
+export type RootCauseGroupId = (typeof ROOT_CAUSE_GROUP_IDS)[number];
 export type AffectedPropertyCode = (typeof AFFECTED_PROPERTY_CODES)[number];
 export type FindingMetricKey = (typeof FINDING_METRIC_KEYS)[number];
 export type DecisionTraceMetricKey = (typeof DECISION_TRACE_METRIC_KEYS)[number];
@@ -209,7 +221,7 @@ export interface SummaryReport {
   reason: string;
   decisionTrace: DecisionTraceReport[];
   topActions: SummaryActionReport[];
-  rootCauseCandidates: SummaryRootCauseReport[];
+  primaryBlockers: PrimaryBlockerReport[];
   overallConfidence: number;
   safeToAutofix: boolean;
   requiresRecapture: boolean;
@@ -267,12 +279,17 @@ export interface SummaryActionReport {
   findingIds: string[];
 }
 
-export interface SummaryRootCauseReport {
-  code: RootCauseCode;
+export interface PrimaryBlockerReport {
+  rootCauseGroupId: RootCauseGroupId;
+  severity: Severity;
   confidence: number;
   reason: string;
-  findingIds: string[];
+  findingCount: number;
+  omittedFindingCount: number;
+  sampleFindingIds: string[];
   signalCodes: FindingSignalCode[];
+  topSelectors: string[];
+  affectedAreaPercent: number;
 }
 
 export interface DecisionTraceReport {
@@ -288,6 +305,7 @@ export interface DecisionTraceReport {
 
 export interface FindingReport {
   id: string;
+  rootCauseGroupId: RootCauseGroupId;
   source: FindingSource;
   kind: RegionKind;
   code: FindingCode;
@@ -323,6 +341,20 @@ export interface TagRollup {
   count: number;
 }
 
+export interface OmittedSelectorRollup {
+  selector: string;
+  count: number;
+  mismatchPixels: number;
+}
+
+export interface OmittedRegionRollup {
+  bbox: BoundingBox;
+  severity: Severity;
+  kind: RegionKind;
+  rootCauseGroupId: RootCauseGroupId;
+  selector: string | null;
+}
+
 export interface RollupsReport {
   bySeverity: SeverityRollup[];
   byKind: KindRollup[];
@@ -331,6 +363,11 @@ export interface RollupsReport {
   findingsCount: number;
   affectedElementCount: number;
   omittedFindings: number;
+  omittedBySeverity: SeverityRollup[];
+  omittedByKind: KindRollup[];
+  topOmittedSelectors: OmittedSelectorRollup[];
+  largestOmittedRegions: OmittedRegionRollup[];
+  tailAreaPercent: number;
 }
 
 export interface CompareReport {

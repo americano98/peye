@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DEFAULT_CLUSTER_PADDING_PX,
   DEFAULT_DOM_OVERLAP_THRESHOLD,
@@ -26,16 +27,21 @@ import type {
   FindingSource,
   IssueType,
   KindRollup,
+  OmittedRegionRollup,
+  OmittedSelectorRollup,
   RegionKind,
   RollupsReport,
+  RootCauseGroupId,
   Severity,
   SeverityRollup,
   TagRollup,
 } from "../types/report.js";
+import { rootCauseGroupIdForFinding } from "./root-cause-groups.js";
 import { AppError } from "../utils/errors.js";
 import { compareSeverityDescending, maxSeverity } from "../utils/severity.js";
 
 interface DraftFinding {
+  rootCauseGroupId: RootCauseGroupId;
   source: FindingSource;
   kind: RegionKind;
   code: FindingCode;
@@ -77,6 +83,7 @@ export function buildFindingsAnalysis(params: {
   height: number;
 }): {
   findings: FindingReport[];
+  fullFindings: FindingReport[];
   rollups: RollupsReport;
   metrics: {
     findingsCount: number;
@@ -98,9 +105,13 @@ export function buildFindingsAnalysis(params: {
   const sortedGroups = draftFindingGroups.sort((left, right) =>
     compareDraftFindings(left.finding, right.finding),
   );
-  const sortedFindings = sortedGroups.map((group) => group.finding);
-  const limitedGroups = sortedGroups.slice(0, DEFAULT_REPORT_FINDINGS_LIMIT);
-  const limitedFindings = limitedGroups.map((group) => group.finding);
+  const sortedFindings = assignStableFindingIds(
+    sortedGroups.map((group) => group.finding),
+    params.width,
+    params.height,
+  );
+  const limitedFindings = sortedFindings.slice(0, DEFAULT_REPORT_FINDINGS_LIMIT);
+  const omittedFindings = sortedFindings.slice(DEFAULT_REPORT_FINDINGS_LIMIT);
   const affectedElementCount =
     params.analysisMode === "dom-elements"
       ? new Set(
@@ -111,10 +122,8 @@ export function buildFindingsAnalysis(params: {
       : 0;
 
   return {
-    findings: limitedFindings.map((finding, index) => ({
-      id: `finding-${String(index + 1).padStart(3, "0")}`,
-      ...finding,
-    })),
+    findings: limitedFindings,
+    fullFindings: sortedFindings,
     rollups: {
       bySeverity: buildSeverityRollups(sortedFindings),
       byKind: buildKindRollups(sortedFindings),
@@ -125,7 +134,16 @@ export function buildFindingsAnalysis(params: {
       rawRegionCount: params.rawRegions.length,
       findingsCount: sortedFindings.length,
       affectedElementCount,
-      omittedFindings: Math.max(0, sortedFindings.length - limitedFindings.length),
+      omittedFindings: omittedFindings.length,
+      omittedBySeverity: buildSeverityRollups(omittedFindings),
+      omittedByKind: buildKindRollups(omittedFindings),
+      topOmittedSelectors: buildTopOmittedSelectors(omittedFindings),
+      largestOmittedRegions: buildLargestOmittedRegions(omittedFindings),
+      tailAreaPercent: Number(
+        omittedFindings
+          .reduce((sum, finding) => sum + finding.mismatchPercentOfCanvas, 0)
+          .toFixed(4),
+      ),
     },
     metrics: {
       findingsCount: sortedFindings.length,
@@ -141,6 +159,172 @@ export function buildFindingsAnalysis(params: {
       };
     }),
   };
+}
+
+function assignStableFindingIds(
+  findings: DraftFinding[],
+  canvasWidth: number,
+  canvasHeight: number,
+): FindingReport[] {
+  const baseIds = findings.map((finding) =>
+    buildStableFindingBaseId(finding, canvasWidth, canvasHeight),
+  );
+  const collisions = new Map<string, number[]>();
+
+  for (let index = 0; index < baseIds.length; index += 1) {
+    const baseId = baseIds[index];
+    const existing = collisions.get(baseId);
+
+    if (existing) {
+      existing.push(index);
+    } else {
+      collisions.set(baseId, [index]);
+    }
+  }
+
+  const ids = new Array<string>(findings.length);
+
+  for (const [baseId, indexes] of collisions.entries()) {
+    if (indexes.length === 1) {
+      ids[indexes[0]] = baseId;
+      continue;
+    }
+
+    indexes
+      .slice()
+      .sort((leftIndex, rightIndex) =>
+        compareStableIdCollision(findings[leftIndex], findings[rightIndex]),
+      )
+      .forEach((findingIndex, collisionIndex) => {
+        ids[findingIndex] =
+          collisionIndex === 0
+            ? baseId
+            : `${baseId}-${String(collisionIndex + 1).padStart(2, "0")}`;
+      });
+  }
+
+  return findings.map((finding, index) => ({
+    id: ids[index],
+    ...finding,
+  }));
+}
+
+function buildStableFindingBaseId(
+  finding: DraftFinding,
+  canvasWidth: number,
+  canvasHeight: number,
+): string {
+  const primaryBox = primaryBoxForFinding(finding);
+  const signature = [
+    finding.code,
+    finding.source,
+    ...normalizeBoxForStableSignature(primaryBox, canvasWidth, canvasHeight),
+    targetKeyForFinding(finding),
+    [...finding.issueTypes].sort().join(","),
+  ].join("|");
+
+  return `finding-${createHash("sha256").update(signature).digest("hex").slice(0, 12)}`;
+}
+
+function normalizeBoxForStableSignature(
+  box: BoundingBox,
+  canvasWidth: number,
+  canvasHeight: number,
+): [string, string, string, string] {
+  const safeWidth = Math.max(1, canvasWidth);
+  const safeHeight = Math.max(1, canvasHeight);
+
+  return [
+    (box.x / safeWidth).toFixed(4),
+    (box.y / safeHeight).toFixed(4),
+    (box.width / safeWidth).toFixed(4),
+    (box.height / safeHeight).toFixed(4),
+  ];
+}
+
+function primaryBoxForFinding(
+  finding: Pick<DraftFinding, "bbox" | "element"> | Pick<FindingReport, "bbox" | "element">,
+): BoundingBox {
+  return finding.element?.bbox ?? finding.bbox;
+}
+
+function targetKeyForFinding(
+  finding:
+    | Pick<DraftFinding, "actionTarget" | "element">
+    | Pick<FindingReport, "actionTarget" | "element">,
+): string {
+  const selector = selectorHintForFinding(finding);
+
+  if (selector) {
+    return selector;
+  }
+
+  return fallbackTargetKeyForFinding(finding);
+}
+
+function selectorHintForFinding(
+  finding:
+    | Pick<DraftFinding, "actionTarget" | "element">
+    | Pick<FindingReport, "actionTarget" | "element">,
+): string | null {
+  return finding.actionTarget?.selector ?? finding.element?.selector ?? null;
+}
+
+function fallbackTargetKeyForFinding(
+  finding:
+    | Pick<DraftFinding, "actionTarget" | "element">
+    | Pick<FindingReport, "actionTarget" | "element">,
+): string {
+  const tag = normalizeTargetFragment(finding.element?.tag ?? finding.actionTarget?.tag ?? null);
+  const role = normalizeTargetFragment(finding.element?.role ?? finding.actionTarget?.role ?? null);
+  const textSnippet = normalizeTargetFragment(
+    finding.element?.textSnippet ?? finding.actionTarget?.textSnippet ?? null,
+  );
+
+  if (tag === null && role === null && textSnippet === null) {
+    return "visual-cluster";
+  }
+
+  return [tag ?? "", role ?? "", textSnippet ?? ""].join("|");
+}
+
+function normalizeTargetFragment(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalized.length === 0 ? null : normalized;
+}
+
+function compareStableIdCollision(left: DraftFinding, right: DraftFinding): number {
+  const leftBox = primaryBoxForFinding(left);
+  const rightBox = primaryBoxForFinding(right);
+
+  for (const delta of [
+    leftBox.y - rightBox.y,
+    leftBox.x - rightBox.x,
+    leftBox.width - rightBox.width,
+    leftBox.height - rightBox.height,
+  ]) {
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+
+  if (left.mismatchPixels !== right.mismatchPixels) {
+    return right.mismatchPixels - left.mismatchPixels;
+  }
+
+  const fallbackTargetOrder = fallbackTargetKeyForFinding(left).localeCompare(
+    fallbackTargetKeyForFinding(right),
+  );
+
+  if (fallbackTargetOrder !== 0) {
+    return fallbackTargetOrder;
+  }
+
+  return compareDraftFindings(left, right);
 }
 
 function buildDomFindings(
@@ -251,8 +435,15 @@ function buildDraftFinding(params: {
   });
   const code = buildFindingCode(kind, signals);
   const hotspots = buildHotspotBoxes(params.regions, primaryBox);
+  const issueTypes = issueTypesForKind(kind);
+  const findingWithoutRootCause = {
+    code,
+    signals,
+    element: elementReport,
+  };
 
   return {
+    rootCauseGroupId: rootCauseGroupIdForFinding(findingWithoutRootCause),
     source: params.source,
     kind,
     code,
@@ -272,7 +463,7 @@ function buildDraftFinding(params: {
       params.totalPixels === 0
         ? 0
         : Number(((mismatchPixels / params.totalPixels) * 100).toFixed(4)),
-    issueTypes: issueTypesForKind(kind),
+    issueTypes,
     likelyAffectedProperties: findingAffectedPropertiesForCode(code),
     signals,
     evidenceRefs: buildFindingEvidenceRefs(code, signals, hotspots),
@@ -635,21 +826,12 @@ function findingAffectedPropertiesForCode(code: FindingCode): AffectedPropertyCo
     case "layout_mismatch":
       return ["layout.position", "layout.spacing", "layout.alignment"];
     case "style_mismatch":
-      return ["style.color", "style.background", "style.border", "style.radius", "style.shadow"];
+      return ["style.color", "style.background", "style.border"];
     case "layout_style_mismatch":
-      return [
-        "layout.position",
-        "layout.spacing",
-        "layout.alignment",
-        "style.color",
-        "style.background",
-        "style.border",
-        "style.radius",
-        "style.shadow",
-      ];
+      return ["layout.position", "layout.spacing", "style.color", "style.background"];
     case "rendering_mismatch":
     default:
-      return ["style.typography", "style.radius", "style.shadow"];
+      return ["style.typography", "style.shadow"];
   }
 }
 
@@ -933,7 +1115,9 @@ function roundConfidence(value: number): number {
   return Number(Math.min(0.99, Math.max(0.05, value)).toFixed(2));
 }
 
-function buildSeverityRollups(findings: DraftFinding[]): SeverityRollup[] {
+function buildSeverityRollups(
+  findings: Array<Pick<DraftFinding, "severity">> | Array<Pick<FindingReport, "severity">>,
+): SeverityRollup[] {
   const severityCounts = new Map<Severity, number>();
 
   for (const finding of findings) {
@@ -945,7 +1129,9 @@ function buildSeverityRollups(findings: DraftFinding[]): SeverityRollup[] {
     .sort((left, right) => compareSeverityDescending(left.severity, right.severity));
 }
 
-function buildKindRollups(findings: DraftFinding[]): KindRollup[] {
+function buildKindRollups(
+  findings: Array<Pick<DraftFinding, "kind">> | Array<Pick<FindingReport, "kind">>,
+): KindRollup[] {
   const kindCounts = new Map<RegionKind, number>();
 
   for (const finding of findings) {
@@ -960,7 +1146,9 @@ function buildKindRollups(findings: DraftFinding[]): KindRollup[] {
     );
 }
 
-function buildTagRollups(findings: DraftFinding[]): TagRollup[] {
+function buildTagRollups(
+  findings: Array<Pick<DraftFinding, "element">> | Array<Pick<FindingReport, "element">>,
+): TagRollup[] {
   const tagCounts = new Map<string, number>();
 
   for (const finding of findings) {
@@ -984,6 +1172,66 @@ function buildTagRollups(findings: DraftFinding[]): TagRollup[] {
     });
 }
 
+function buildTopOmittedSelectors(findings: FindingReport[]): OmittedSelectorRollup[] {
+  const selectorRollups = new Map<string, OmittedSelectorRollup>();
+
+  for (const finding of findings) {
+    const selector = selectorHintForFinding(finding);
+
+    if (!selector) {
+      continue;
+    }
+
+    const existing = selectorRollups.get(selector);
+
+    if (existing) {
+      existing.count += 1;
+      existing.mismatchPixels += finding.mismatchPixels;
+      continue;
+    }
+
+    selectorRollups.set(selector, {
+      selector,
+      count: 1,
+      mismatchPixels: finding.mismatchPixels,
+    });
+  }
+
+  return Array.from(selectorRollups.values())
+    .sort((left, right) => {
+      if (left.count !== right.count) {
+        return right.count - left.count;
+      }
+
+      if (left.mismatchPixels !== right.mismatchPixels) {
+        return right.mismatchPixels - left.mismatchPixels;
+      }
+
+      return left.selector.localeCompare(right.selector);
+    })
+    .slice(0, 5);
+}
+
+function buildLargestOmittedRegions(findings: FindingReport[]): OmittedRegionRollup[] {
+  return findings
+    .slice()
+    .sort((left, right) => {
+      if (left.mismatchPixels !== right.mismatchPixels) {
+        return right.mismatchPixels - left.mismatchPixels;
+      }
+
+      return compareDraftFindings(left, right);
+    })
+    .slice(0, 5)
+    .map((finding) => ({
+      bbox: finding.bbox,
+      severity: finding.severity,
+      kind: finding.kind,
+      rootCauseGroupId: finding.rootCauseGroupId,
+      selector: selectorHintForFinding(finding),
+    }));
+}
+
 function compareDraftFindings(left: DraftFinding, right: DraftFinding): number {
   const severityOrder = compareSeverityDescending(left.severity, right.severity);
 
@@ -1003,5 +1251,11 @@ function compareDraftFindings(left: DraftFinding, right: DraftFinding): number {
     return left.bbox.x - right.bbox.x;
   }
 
-  return left.summary.localeCompare(right.summary);
+  const summaryOrder = left.summary.localeCompare(right.summary);
+
+  if (summaryOrder !== 0) {
+    return summaryOrder;
+  }
+
+  return left.rootCauseGroupId.localeCompare(right.rootCauseGroupId);
 }

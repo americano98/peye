@@ -8,24 +8,52 @@ import {
   type FindingCode,
   type FindingReport,
   type FindingSignalCode,
+  type PrimaryBlockerReport,
   type Recommendation,
   type RootCauseCode,
+  type RootCauseGroupId,
   type Severity,
   type SummaryActionCode,
   type SummaryActionReport,
   type SummaryReport,
-  type SummaryRootCauseReport,
 } from "../types/report.js";
+import {
+  ROOT_CAUSE_GROUP_REASONS,
+  comparePrimaryBlockers,
+  rootCauseGroupIdForFailureOrigin,
+} from "./root-cause-groups.js";
 import { compareSeverityDescending } from "../utils/severity.js";
 
 export type FailureOrigin = "preview" | "reference" | "unknown";
 
-interface RootCauseCandidateInternal extends SummaryRootCauseReport {
+interface RootCauseCandidateInternal {
+  code: RootCauseCode;
+  confidence: number;
+  reason: string;
+  findingIds: string[];
+  signalCodes: FindingSignalCode[];
   highestSeverity: Severity;
 }
 
 interface ActionCandidateInternal extends SummaryActionReport {
   highestSeverity: Severity;
+}
+
+interface PrimaryBlockerInternal extends PrimaryBlockerReport {
+  highestSeverity: Severity;
+}
+
+interface PrimaryBlockerAccumulator {
+  rootCauseGroupId: RootCauseGroupId;
+  confidence: number;
+  reason: string;
+  findingCount: number;
+  omittedFindingCount: number;
+  sampleFindingIds: string[];
+  signalCodes: FindingSignalCode[];
+  affectedAreaPercent: number;
+  highestSeverity: Severity;
+  selectorStats: Map<string, { count: number; mismatchPixels: number }>;
 }
 
 const ROOT_CAUSE_REASONS: Record<RootCauseCode, string> = {
@@ -87,6 +115,7 @@ const ROOT_CAUSE_TO_ACTION: Record<RootCauseCode, SummaryActionCode> = {
 export function buildSummaryReport(params: {
   baseDecision: RecommendationDecision;
   findings: FindingReport[];
+  fullFindings: FindingReport[];
   analysisMode: AnalysisMode;
   omittedFindings: number;
   error: ErrorReport | null;
@@ -107,12 +136,16 @@ export function buildSummaryReport(params: {
     fallbackSeverity: params.baseDecision.severity,
   });
   const topActions = buildTopActions(rootCauseCandidates, findingOrder);
-  const limitedRootCauseCandidates = rootCauseCandidates
-    .slice(0, 3)
-    .map(({ highestSeverity: _highestSeverity, ...candidate }) => candidate);
   const limitedTopActions = topActions
     .slice(0, 3)
     .map(({ highestSeverity: _highestSeverity, ...action }) => action);
+  const primaryBlockers = buildPrimaryBlockers({
+    emittedFindings: params.findings,
+    fullFindings: params.fullFindings,
+    error: params.error,
+    failureOrigin: params.failureOrigin,
+    fallbackSeverity: params.baseDecision.severity,
+  });
   const requiresRecapture =
     params.error !== null || decisionTrace.some((trace) => trace.axis === "setup_capture_risk");
   const safeToAutofix = canSafelyAutofix({
@@ -129,7 +162,7 @@ export function buildSummaryReport(params: {
     reason: decisionTrace.at(-1)?.reason ?? params.baseDecision.reason,
     decisionTrace,
     topActions: limitedTopActions,
-    rootCauseCandidates: limitedRootCauseCandidates,
+    primaryBlockers,
     overallConfidence: buildOverallConfidence({
       recommendation: params.baseDecision.recommendation,
       decisionTrace,
@@ -243,6 +276,128 @@ function buildRootCauseCandidates(params: {
   }
 
   return Array.from(candidates.values()).sort(compareRankedCandidates);
+}
+
+function buildPrimaryBlockers(params: {
+  emittedFindings: FindingReport[];
+  fullFindings: FindingReport[];
+  error: ErrorReport | null;
+  failureOrigin: FailureOrigin | undefined;
+  fallbackSeverity: Severity;
+}): PrimaryBlockerReport[] {
+  if (params.error) {
+    const rootCauseGroupId = rootCauseGroupIdForFailureOrigin(params.failureOrigin ?? "unknown");
+    const confidence = (params.failureOrigin ?? "unknown") === "unknown" ? 0.9 : 0.95;
+
+    return [
+      {
+        rootCauseGroupId,
+        severity: params.fallbackSeverity,
+        confidence,
+        reason: ROOT_CAUSE_GROUP_REASONS[rootCauseGroupId],
+        findingCount: 0,
+        omittedFindingCount: 0,
+        sampleFindingIds: [],
+        signalCodes: [],
+        topSelectors: [],
+        affectedAreaPercent: 0,
+      },
+    ];
+  }
+
+  if (params.fullFindings.length === 0) {
+    return [];
+  }
+
+  const emittedFindingIds = new Set(params.emittedFindings.map((finding) => finding.id));
+  const findingOrder = new Map(params.fullFindings.map((finding, index) => [finding.id, index]));
+  const blockers = new Map<RootCauseGroupId, PrimaryBlockerAccumulator>();
+
+  for (const finding of params.fullFindings) {
+    const rootCauseGroupId = finding.rootCauseGroupId;
+    const existing = blockers.get(rootCauseGroupId);
+
+    if (existing) {
+      existing.confidence = Math.max(existing.confidence, finding.confidence);
+      existing.findingCount += 1;
+      existing.omittedFindingCount += emittedFindingIds.has(finding.id) ? 0 : 1;
+      existing.sampleFindingIds = mergeFindingIds(
+        existing.sampleFindingIds,
+        [finding.id],
+        findingOrder,
+      ).slice(0, 3);
+      existing.signalCodes = mergeSignalCodes(existing.signalCodes, finding.signals);
+      existing.affectedAreaPercent = Number(
+        (existing.affectedAreaPercent + finding.mismatchPercentOfCanvas).toFixed(4),
+      );
+      existing.highestSeverity = moreSevere(existing.highestSeverity, finding.severity);
+    } else {
+      blockers.set(rootCauseGroupId, {
+        rootCauseGroupId,
+        confidence: finding.confidence,
+        reason: ROOT_CAUSE_GROUP_REASONS[rootCauseGroupId],
+        findingCount: 1,
+        omittedFindingCount: emittedFindingIds.has(finding.id) ? 0 : 1,
+        sampleFindingIds: [finding.id],
+        signalCodes: sortSignalCodes(finding.signals.map((signal) => signal.code)),
+        affectedAreaPercent: Number(finding.mismatchPercentOfCanvas.toFixed(4)),
+        highestSeverity: finding.severity,
+        selectorStats: new Map(),
+      });
+    }
+
+    const blocker = blockers.get(rootCauseGroupId);
+    const selector = selectorHintForFinding(finding);
+
+    if (!blocker || !selector) {
+      continue;
+    }
+
+    const selectorStats = blocker.selectorStats.get(selector);
+
+    if (selectorStats) {
+      selectorStats.count += 1;
+      selectorStats.mismatchPixels += finding.mismatchPixels;
+      continue;
+    }
+
+    blocker.selectorStats.set(selector, {
+      count: 1,
+      mismatchPixels: finding.mismatchPixels,
+    });
+  }
+
+  return Array.from(blockers.values())
+    .map(
+      (blocker): PrimaryBlockerInternal => ({
+        rootCauseGroupId: blocker.rootCauseGroupId,
+        severity: blocker.highestSeverity,
+        confidence: blocker.confidence,
+        reason: blocker.reason,
+        findingCount: blocker.findingCount,
+        omittedFindingCount: blocker.omittedFindingCount,
+        sampleFindingIds: blocker.sampleFindingIds,
+        signalCodes: blocker.signalCodes,
+        topSelectors: Array.from(blocker.selectorStats.entries())
+          .sort((left, right) => {
+            if (left[1].count !== right[1].count) {
+              return right[1].count - left[1].count;
+            }
+
+            if (left[1].mismatchPixels !== right[1].mismatchPixels) {
+              return right[1].mismatchPixels - left[1].mismatchPixels;
+            }
+
+            return left[0].localeCompare(right[0]);
+          })
+          .slice(0, 3)
+          .map(([selector]) => selector),
+        affectedAreaPercent: Number(blocker.affectedAreaPercent.toFixed(4)),
+        highestSeverity: blocker.highestSeverity,
+      }),
+    )
+    .sort((left, right) => comparePrimaryBlockers(left, right, compareSeverityDescending))
+    .map(({ highestSeverity: _highestSeverity, ...blocker }) => blocker);
 }
 
 function buildFindingRootCauseCandidates(
@@ -628,6 +783,12 @@ function mergeSignalCodes(
   signals: Pick<FindingReport, "signals">["signals"],
 ): FindingSignalCode[] {
   return sortSignalCodes([...existing, ...signals.map((signal) => signal.code)]);
+}
+
+function selectorHintForFinding(
+  finding: Pick<FindingReport, "actionTarget" | "element">,
+): string | null {
+  return finding.actionTarget?.selector ?? finding.element?.selector ?? null;
 }
 
 function sortSignalCodes(values: FindingSignalCode[]): FindingSignalCode[] {

@@ -123,7 +123,7 @@ describe("runCompare integration", () => {
       "final_pass",
     ]);
     expect(result.report.summary.topActions).toEqual([]);
-    expect(result.report.summary.rootCauseCandidates).toEqual([]);
+    expect(result.report.summary.primaryBlockers).toEqual([]);
     expect(result.report.summary.overallConfidence).toBe(0.85);
     expect(result.report.summary.safeToAutofix).toBe(false);
     expect(result.report.summary.requiresRecapture).toBe(false);
@@ -588,7 +588,9 @@ describe("runCompare integration", () => {
           "Text content likely overflows the element bounds and is being clipped on the horizontal axis.",
       });
       expect(result.report.summary.topActions[0]?.code).toBe("fix_text_overflow");
-      expect(result.report.summary.rootCauseCandidates[0]?.code).toBe("text_overflow");
+      expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe(
+        "text-wrap-regression",
+      );
       expect(result.report.summary.safeToAutofix).toBe(true);
       expect(result.report.summary.requiresRecapture).toBe(false);
     } finally {
@@ -685,7 +687,7 @@ describe("runCompare integration", () => {
           "Element bounds were clipped by the preview capture on the right edge(s); check selector scope and capture framing.",
       });
       expect(result.report.summary.topActions[0]?.code).toBe("recapture_with_broader_scope");
-      expect(result.report.summary.rootCauseCandidates[0]?.code).toBe("capture_scope_too_tight");
+      expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
       expect(result.report.summary.safeToAutofix).toBe(false);
       expect(result.report.summary.requiresRecapture).toBe(true);
     } finally {
@@ -743,7 +745,7 @@ describe("runCompare integration", () => {
       expect(report.error?.message).toContain("Preview selector could not be captured: #missing.");
       expect(report.error?.exitCode).toBe(3);
       expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
-      expect(report.summary.rootCauseCandidates[0]?.code).toBe("preview_input_or_runtime_error");
+      expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
       expect(report.summary.safeToAutofix).toBe(false);
       expect(report.summary.requiresRecapture).toBe(true);
       expect(report.images).toEqual({
@@ -964,9 +966,7 @@ describe("runCompare integration", () => {
     expect(result.report.findings).toHaveLength(1);
     expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
     expect(result.report.summary.topActions[0]?.code).toBe("verify_viewport_or_reference");
-    expect(result.report.summary.rootCauseCandidates[0]?.code).toBe(
-      "viewport_or_reference_mismatch",
-    );
+    expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
     expect(result.report.summary.safeToAutofix).toBe(false);
     expect(result.report.summary.requiresRecapture).toBe(true);
     expect(result.report.findings[0]?.kind).toBe("dimension");
@@ -1039,6 +1039,20 @@ describe("runCompare integration", () => {
     expect(result.report.metrics.findingsCount).toBe(100);
     expect(result.report.findings).toHaveLength(19);
     expect(result.report.rollups.omittedFindings).toBe(81);
+    expect(result.report.rollups.omittedBySeverity).toEqual([{ severity: "medium", count: 81 }]);
+    expect(result.report.rollups.omittedByKind).toEqual([{ kind: "mixed", count: 81 }]);
+    expect(result.report.rollups.topOmittedSelectors).toEqual([]);
+    expect(result.report.rollups.largestOmittedRegions).toHaveLength(5);
+    expect(
+      result.report.rollups.largestOmittedRegions.every(
+        (region) => region.kind === result.report.rollups.omittedByKind[0]?.kind,
+      ),
+    ).toBe(true);
+    expect(
+      new Set(result.report.rollups.largestOmittedRegions.map((region) => region.rootCauseGroupId))
+        .size,
+    ).toBe(1);
+    expect(result.report.rollups.tailAreaPercent).toBeGreaterThan(1);
     expect(reportBuffer.byteLength).toBeLessThan(32_000);
   });
 
@@ -1202,9 +1216,7 @@ describe("runCompare integration", () => {
       expect(result.report.summary.recommendation).toBe("needs_human_review");
       expect(result.report.analysisMode).toBe("visual-clusters");
       expect(report.summary.topActions[0]?.code).toBe("fix_reference_setup");
-      expect(report.summary.rootCauseCandidates[0]?.code).toBe(
-        "reference_input_or_acquisition_error",
-      );
+      expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("reference-setup-error");
       expect(report.summary.safeToAutofix).toBe(false);
       expect(report.summary.requiresRecapture).toBe(true);
       expect(report.error).toEqual({
@@ -1616,7 +1628,7 @@ describe("runCompare integration", () => {
     expect(result.exitCode).toBe(1);
     expect(report.summary.recommendation).toBe("needs_human_review");
     expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
-    expect(report.summary.rootCauseCandidates[0]?.code).toBe("preview_input_or_runtime_error");
+    expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
     expect(report.summary.safeToAutofix).toBe(false);
     expect(report.summary.requiresRecapture).toBe(true);
     expect(report.error).toEqual({
@@ -1663,7 +1675,7 @@ describe("runCompare integration", () => {
 
     expect(result.exitCode).toBe(1);
     expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
-    expect(report.summary.rootCauseCandidates[0]?.code).toBe("preview_input_or_runtime_error");
+    expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
     expect(report.summary.safeToAutofix).toBe(false);
     expect(report.summary.requiresRecapture).toBe(true);
     expect(report.error).toEqual({

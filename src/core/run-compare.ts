@@ -118,6 +118,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
     const summary = buildSummaryReport({
       baseDecision: decision,
       findings: findingsAnalysis.findings,
+      fullFindings: findingsAnalysis.fullFindings,
       analysisMode: preparedPreview.analysisMode,
       omittedFindings: findingsAnalysis.rollups.omittedFindings,
       error: null,
@@ -189,6 +190,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
           decisionTrace: [],
         },
         findings: [],
+        fullFindings: [],
         analysisMode: failureAnalysisMode,
         omittedFindings: 0,
         error: errorReport,
