@@ -186,6 +186,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
           recommendation: error.recommendation ?? "needs_human_review",
           severity: error.severity ?? (error.exitCode === 1 ? "medium" : "high"),
           reason: error.message,
+          decisionTrace: [],
         },
         findings: [],
         analysisMode: failureAnalysisMode,

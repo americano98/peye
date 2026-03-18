@@ -204,9 +204,10 @@ peye compare \
 - `heatmap.png`: mismatch heatmap with highlighted findings
 - `report.json`: compact machine-readable result optimized for agent workflows
 
-`report.json` is versioned and compact by default:
+`report.json` is compact and deterministic by default:
 
 - `analysisMode` is `dom-elements` for URL captures and `visual-clusters` for local image inputs
+- `summary.decisionTrace` shows which matrix rules fired, in fixed axis order, and why they pushed the recommendation
 - `summary.topActions` and `summary.rootCauseCandidates` turn the report into a decision object instead of a diff-only payload
 - `summary.safeToAutofix` and `summary.requiresRecapture` let an agent choose between patching code, fixing setup, or stopping early
 - `images` preserves normalized preview, reference, and padded canvas dimensions for fast debugging
@@ -245,6 +246,38 @@ Example `report.json` shape:
     "recommendation": "retry_fix",
     "severity": "medium",
     "reason": "Mismatch is 3.21%; localized issues were detected and should be fixed before retrying.",
+    "decisionTrace": [
+      {
+        "axis": "color",
+        "code": "color_localized_drift",
+        "outcome": "retry_fix",
+        "strength": "medium",
+        "reason": "Color or style drift appears localized to a small set of findings and is likely fixable.",
+        "findingIds": ["finding-001"],
+        "signalCodes": ["probable_text_clipping"],
+        "metricKeys": ["meanColorDelta", "maxColorDelta"]
+      },
+      {
+        "axis": "fixability",
+        "code": "fixability_localized_actionable",
+        "outcome": "retry_fix",
+        "strength": "high",
+        "reason": "The dominant findings are concentrated and actionable enough for another automated fix attempt.",
+        "findingIds": ["finding-001"],
+        "signalCodes": ["probable_text_clipping"],
+        "metricKeys": ["mismatchPercent"]
+      },
+      {
+        "axis": "final",
+        "code": "final_retry_fix",
+        "outcome": "retry_fix",
+        "strength": "high",
+        "reason": "Mismatch is 3.21%; localized, fixable issues were detected and should be corrected before retrying.",
+        "findingIds": ["finding-001"],
+        "signalCodes": ["probable_text_clipping"],
+        "metricKeys": ["mismatchPercent"]
+      }
+    ],
     "topActions": [
       {
         "code": "fix_text_overflow",
@@ -262,7 +295,7 @@ Example `report.json` shape:
         "signalCodes": ["probable_text_clipping"]
       }
     ],
-    "overallConfidence": 0.84,
+    "overallConfidence": 0.85,
     "safeToAutofix": true,
     "requiresRecapture": false
   },
@@ -404,6 +437,28 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
     "recommendation": "needs_human_review",
     "severity": "medium",
     "reason": "Preview URL requires --viewport so the browser screenshot is deterministic.",
+    "decisionTrace": [
+      {
+        "axis": "setup_capture_risk",
+        "code": "setup_capture_signal_risk",
+        "outcome": "needs_human_review",
+        "strength": "medium",
+        "reason": "Preview URL requires --viewport so the browser screenshot is deterministic.",
+        "findingIds": [],
+        "signalCodes": [],
+        "metricKeys": []
+      },
+      {
+        "axis": "final",
+        "code": "final_needs_human_review",
+        "outcome": "needs_human_review",
+        "strength": "medium",
+        "reason": "Preview URL requires --viewport so the browser screenshot is deterministic.",
+        "findingIds": [],
+        "signalCodes": [],
+        "metricKeys": []
+      }
+    ],
     "topActions": [
       {
         "code": "fix_preview_setup",
@@ -421,7 +476,7 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
         "signalCodes": []
       }
     ],
-    "overallConfidence": 0.95,
+    "overallConfidence": 0.72,
     "safeToAutofix": false,
     "requiresRecapture": true
   },
@@ -433,7 +488,7 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 }
 ```
 
-For automation, prefer `summary.topActions[0]`, `summary.rootCauseCandidates[0]`, `summary.safeToAutofix`, `summary.requiresRecapture`, `findings[].code`, `findings[].fixHint`, and `findings[].actionTarget` before falling back to `summary.reason`.
+For automation, prefer `summary.decisionTrace[0]`, `summary.topActions[0]`, `summary.rootCauseCandidates[0]`, `summary.safeToAutofix`, `summary.requiresRecapture`, `findings[].code`, `findings[].fixHint`, and `findings[].actionTarget` before falling back to `summary.reason`.
 
 ## Exit Codes
 

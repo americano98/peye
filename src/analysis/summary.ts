@@ -2,6 +2,8 @@ import type { RecommendationDecision } from "../types/internal.js";
 import {
   FINDING_SIGNAL_CODES,
   type AnalysisMode,
+  type DecisionStrength,
+  type DecisionTraceReport,
   type ErrorReport,
   type FindingCode,
   type FindingReport,
@@ -91,13 +93,19 @@ export function buildSummaryReport(params: {
   failureOrigin?: FailureOrigin;
 }): SummaryReport {
   const findingOrder = new Map(params.findings.map((finding, index) => [finding.id, index]));
-  const rootCauseCandidates = params.error
-    ? buildFailureRootCauseCandidates(
-        params.baseDecision.severity,
-        params.error,
-        params.failureOrigin,
-      )
-    : buildRootCauseCandidates(params.findings, findingOrder);
+  const decisionTrace = normalizeDecisionTrace({
+    baseDecision: params.baseDecision,
+    error: params.error,
+    failureOrigin: params.failureOrigin,
+  });
+  const rootCauseCandidates = buildRootCauseCandidates({
+    findings: params.findings,
+    decisionTrace,
+    findingOrder,
+    error: params.error,
+    failureOrigin: params.failureOrigin,
+    fallbackSeverity: params.baseDecision.severity,
+  });
   const topActions = buildTopActions(rootCauseCandidates, findingOrder);
   const limitedRootCauseCandidates = rootCauseCandidates
     .slice(0, 3)
@@ -106,8 +114,7 @@ export function buildSummaryReport(params: {
     .slice(0, 3)
     .map(({ highestSeverity: _highestSeverity, ...action }) => action);
   const requiresRecapture =
-    params.error !== null ||
-    requiresRecaptureForRootCause(limitedRootCauseCandidates[0]?.code ?? null);
+    params.error !== null || decisionTrace.some((trace) => trace.axis === "setup_capture_risk");
   const safeToAutofix = canSafelyAutofix({
     recommendation: params.baseDecision.recommendation,
     error: params.error,
@@ -119,13 +126,13 @@ export function buildSummaryReport(params: {
   return {
     recommendation: params.baseDecision.recommendation,
     severity: params.baseDecision.severity,
-    reason: params.baseDecision.reason,
+    reason: decisionTrace.at(-1)?.reason ?? params.baseDecision.reason,
+    decisionTrace,
     topActions: limitedTopActions,
     rootCauseCandidates: limitedRootCauseCandidates,
     overallConfidence: buildOverallConfidence({
       recommendation: params.baseDecision.recommendation,
-      topAction: limitedTopActions[0] ?? null,
-      topRootCause: limitedRootCauseCandidates[0] ?? null,
+      decisionTrace,
       analysisMode: params.analysisMode,
       omittedFindings: params.omittedFindings,
     }),
@@ -134,7 +141,111 @@ export function buildSummaryReport(params: {
   };
 }
 
-function buildRootCauseCandidates(
+function normalizeDecisionTrace(params: {
+  baseDecision: RecommendationDecision;
+  error: ErrorReport | null;
+  failureOrigin: FailureOrigin | undefined;
+}): DecisionTraceReport[] {
+  const axisTraces = params.baseDecision.decisionTrace.filter((trace) => trace.axis !== "final");
+  const finalTrace = params.baseDecision.decisionTrace.find((trace) => trace.axis === "final");
+
+  if (finalTrace) {
+    return [...axisTraces, finalTrace];
+  }
+
+  if (!params.error) {
+    return axisTraces;
+  }
+
+  const syntheticAxisTrace = buildSyntheticFailureAxisTrace(
+    params.error,
+    params.baseDecision,
+    params.failureOrigin ?? "unknown",
+  );
+  const traces = syntheticAxisTrace ? [syntheticAxisTrace] : [];
+
+  return [...traces, buildSyntheticFailureFinalTrace(params.baseDecision, syntheticAxisTrace)];
+}
+
+function buildSyntheticFailureAxisTrace(
+  error: ErrorReport,
+  baseDecision: RecommendationDecision,
+  failureOrigin: FailureOrigin,
+): DecisionTraceReport | null {
+  if (failureOrigin === "reference") {
+    return null;
+  }
+
+  return {
+    axis: "setup_capture_risk",
+    code: "setup_capture_signal_risk",
+    outcome: baseDecision.recommendation,
+    strength: error.exitCode === 1 ? "medium" : "high",
+    reason: error.message,
+    findingIds: [],
+    signalCodes: [],
+    metricKeys: [],
+  };
+}
+
+function buildSyntheticFailureFinalTrace(
+  baseDecision: RecommendationDecision,
+  syntheticAxisTrace: DecisionTraceReport | null,
+): DecisionTraceReport {
+  return {
+    axis: "final",
+    code:
+      baseDecision.recommendation === "pass"
+        ? "final_pass"
+        : baseDecision.recommendation === "pass_with_tolerated_differences"
+          ? "final_pass_with_tolerated_differences"
+          : baseDecision.recommendation === "retry_fix"
+            ? "final_retry_fix"
+            : "final_needs_human_review",
+    outcome: baseDecision.recommendation,
+    strength: syntheticAxisTrace?.strength ?? severityToDecisionStrength(baseDecision.severity),
+    reason: baseDecision.reason,
+    findingIds: syntheticAxisTrace?.findingIds ?? [],
+    signalCodes: syntheticAxisTrace?.signalCodes ?? [],
+    metricKeys: syntheticAxisTrace?.metricKeys ?? [],
+  };
+}
+
+function buildRootCauseCandidates(params: {
+  findings: FindingReport[];
+  decisionTrace: DecisionTraceReport[];
+  findingOrder: Map<string, number>;
+  error: ErrorReport | null;
+  failureOrigin: FailureOrigin | undefined;
+  fallbackSeverity: Severity;
+}): RootCauseCandidateInternal[] {
+  const candidates = new Map<RootCauseCode, RootCauseCandidateInternal>();
+
+  mergeRootCauseCandidates(
+    candidates,
+    buildFindingRootCauseCandidates(params.findings, params.findingOrder),
+    params.findingOrder,
+  );
+  if (!params.error) {
+    mergeRootCauseCandidates(
+      candidates,
+      buildTraceRootCauseCandidates(params.decisionTrace),
+      params.findingOrder,
+    );
+  }
+
+  if (params.error) {
+    mergeRootCauseCandidates(
+      candidates,
+      buildFailureRootCauseCandidates(params.fallbackSeverity, params.error, params.failureOrigin),
+      params.findingOrder,
+    );
+  }
+
+  return Array.from(candidates.values()).sort(compareRankedCandidates);
+}
+
+function buildFindingRootCauseCandidates(
   findings: FindingReport[],
   findingOrder: Map<string, number>,
 ): RootCauseCandidateInternal[] {
@@ -163,18 +274,35 @@ function buildRootCauseCandidates(
         confidence: finding.confidence,
         reason: ROOT_CAUSE_REASONS[code],
         findingIds: [finding.id],
-        signalCodes: finding.signals.map((signal) => signal.code),
+        signalCodes: sortSignalCodes(finding.signals.map((signal) => signal.code)),
         highestSeverity: finding.severity,
       });
     }
   }
 
-  return Array.from(candidates.values())
-    .map((candidate) => ({
-      ...candidate,
-      signalCodes: sortSignalCodes(candidate.signalCodes),
-    }))
-    .sort(compareRankedCandidates);
+  return Array.from(candidates.values());
+}
+
+function buildTraceRootCauseCandidates(
+  decisionTrace: DecisionTraceReport[],
+): RootCauseCandidateInternal[] {
+  const candidates: RootCauseCandidateInternal[] = [];
+  const finalOutcome = decisionTrace.find((trace) => trace.axis === "final")?.outcome ?? null;
+
+  for (const trace of decisionTrace) {
+    for (const code of rootCauseCodesForTrace(trace, finalOutcome)) {
+      candidates.push({
+        code,
+        confidence: candidateConfidenceForDecisionStrength(trace.strength),
+        reason: ROOT_CAUSE_REASONS[code],
+        findingIds: [...trace.findingIds],
+        signalCodes: [...trace.signalCodes],
+        highestSeverity: strengthToSeverity(trace.strength),
+      });
+    }
+  }
+
+  return candidates;
 }
 
 function buildFailureRootCauseCandidates(
@@ -228,6 +356,87 @@ function buildTopActions(
   }
 
   return Array.from(actions.values()).sort(compareRankedCandidates);
+}
+
+function rootCauseCodesForTrace(
+  trace: DecisionTraceReport,
+  finalOutcome: Recommendation | null,
+): RootCauseCode[] {
+  switch (trace.code) {
+    case "dimension_moderate_mismatch":
+    case "dimension_strong_mismatch":
+      return trace.signalCodes.includes("possible_viewport_mismatch")
+        ? ["viewport_or_reference_mismatch"]
+        : ["missing_or_extra_content"];
+    case "layout_global_drift":
+      return finalOutcome === "needs_human_review" ? ["layout_displacement"] : [];
+    case "color_global_drift":
+      return finalOutcome === "needs_human_review" ? ["visual_style_drift"] : [];
+    case "setup_capture_signal_risk": {
+      const codes = new Set<RootCauseCode>();
+
+      for (const signalCode of trace.signalCodes) {
+        if (signalCode === "possible_capture_crop") {
+          codes.add("capture_scope_too_tight");
+        }
+
+        if (signalCode === "possible_viewport_mismatch") {
+          codes.add("viewport_or_reference_mismatch");
+        }
+      }
+
+      if (codes.size === 0) {
+        codes.add("viewport_or_reference_mismatch");
+      }
+
+      return Array.from(codes);
+    }
+    case "setup_ignored_area_risk":
+      return ["viewport_or_reference_mismatch"];
+    case "pixel_strict_pass":
+    case "pixel_tolerated_pass":
+    case "pixel_retry_range":
+    case "pixel_exceeds_retry_range":
+    case "layout_localized_drift":
+    case "color_localized_drift":
+    case "fixability_localized_actionable":
+    case "fixability_diffuse_or_unaddressable":
+    case "final_pass":
+    case "final_pass_with_tolerated_differences":
+    case "final_retry_fix":
+    case "final_needs_human_review":
+      return [];
+    default:
+      return [];
+  }
+}
+
+function mergeRootCauseCandidates(
+  target: Map<RootCauseCode, RootCauseCandidateInternal>,
+  incoming: RootCauseCandidateInternal[],
+  findingOrder: Map<string, number>,
+): void {
+  for (const candidate of incoming) {
+    const existing = target.get(candidate.code);
+
+    if (existing) {
+      existing.confidence = Math.max(existing.confidence, candidate.confidence);
+      existing.highestSeverity = moreSevere(existing.highestSeverity, candidate.highestSeverity);
+      existing.findingIds = mergeFindingIds(
+        existing.findingIds,
+        candidate.findingIds,
+        findingOrder,
+      );
+      existing.signalCodes = sortSignalCodes([...existing.signalCodes, ...candidate.signalCodes]);
+      continue;
+    }
+
+    target.set(candidate.code, {
+      ...candidate,
+      findingIds: mergeFindingIds([], candidate.findingIds, findingOrder),
+      signalCodes: sortSignalCodes(candidate.signalCodes),
+    });
+  }
 }
 
 function classifyFailureRootCause(errorCode: string, failureOrigin: FailureOrigin): RootCauseCode {
@@ -289,27 +498,18 @@ function canSafelyAutofix(params: {
   });
 }
 
-function requiresRecaptureForRootCause(code: RootCauseCode | null): boolean {
-  return code === "capture_scope_too_tight" || code === "viewport_or_reference_mismatch";
-}
-
 function buildOverallConfidence(params: {
   recommendation: Recommendation;
-  topAction: SummaryActionReport | null;
-  topRootCause: SummaryRootCauseReport | null;
+  decisionTrace: DecisionTraceReport[];
   analysisMode: AnalysisMode;
   omittedFindings: number;
 }): number {
-  let confidence =
-    params.topAction?.confidence ??
-    params.topRootCause?.confidence ??
-    fallbackConfidenceForRecommendation(params.recommendation);
+  const finalTrace = params.decisionTrace.find((trace) => trace.axis === "final");
+  let confidence = finalTrace
+    ? confidenceForDecisionStrength(finalTrace.strength)
+    : fallbackConfidenceForRecommendation(params.recommendation);
 
-  const findingBased =
-    (params.topAction?.findingIds.length ?? 0) > 0 ||
-    (params.topRootCause?.findingIds.length ?? 0) > 0;
-
-  if (findingBased && params.analysisMode === "visual-clusters") {
+  if (finalTrace?.outcome === "retry_fix" && params.analysisMode === "visual-clusters") {
     confidence -= 0.1;
   }
 
@@ -320,17 +520,73 @@ function buildOverallConfidence(params: {
   return roundConfidence(confidence);
 }
 
+function confidenceForDecisionStrength(strength: DecisionStrength): number {
+  switch (strength) {
+    case "critical":
+      return 0.95;
+    case "high":
+      return 0.85;
+    case "medium":
+      return 0.72;
+    case "low":
+    default:
+      return 0.6;
+  }
+}
+
+function candidateConfidenceForDecisionStrength(strength: DecisionStrength): number {
+  switch (strength) {
+    case "critical":
+      return 0.99;
+    case "high":
+      return 0.96;
+    case "medium":
+      return 0.8;
+    case "low":
+    default:
+      return 0.65;
+  }
+}
+
 function fallbackConfidenceForRecommendation(recommendation: Recommendation): number {
   switch (recommendation) {
     case "pass":
-      return 0.99;
+      return 0.95;
     case "pass_with_tolerated_differences":
-      return 0.9;
+      return 0.85;
     case "retry_fix":
-      return 0.75;
+      return 0.72;
     case "needs_human_review":
     default:
-      return 0.7;
+      return 0.6;
+  }
+}
+
+function severityToDecisionStrength(severity: Severity): DecisionStrength {
+  switch (severity) {
+    case "critical":
+      return "critical";
+    case "high":
+      return "high";
+    case "medium":
+      return "medium";
+    case "low":
+    default:
+      return "low";
+  }
+}
+
+function strengthToSeverity(strength: DecisionStrength): Severity {
+  switch (strength) {
+    case "critical":
+      return "critical";
+    case "high":
+      return "high";
+    case "medium":
+      return "medium";
+    case "low":
+    default:
+      return "low";
   }
 }
 

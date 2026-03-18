@@ -93,7 +93,7 @@ describe("built CLI integration", () => {
       outputPath: previewPath,
       width: 100,
       height: 100,
-      body: `<rect x="20" y="10" width="30" height="30" fill="#0b84ff" />`,
+      body: `<rect x="15" y="10" width="30" height="30" fill="#0b84ff" />`,
     });
 
     const result = await runCli([
@@ -102,6 +102,8 @@ describe("built CLI integration", () => {
       previewPath,
       "--reference",
       referencePath,
+      "--mode",
+      "layout",
       "--output",
       outputPath,
     ]);
@@ -109,6 +111,9 @@ describe("built CLI integration", () => {
     expect(result.code).toBe(2);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("recommendation: retry_fix");
+    expect(result.stdout).toContain("decisionRule:");
+    expect(result.stdout).toContain("topAction:");
+    expect(result.stdout).toContain("requiresRecapture: false");
     expect(result.stdout).toContain(`output: ${outputPath}`);
   });
 
@@ -185,6 +190,7 @@ describe("built CLI integration", () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).not.toContain("recommendation:");
+    expect(result.stdout).not.toContain("decisionRule:");
     expect("reportVersion" in stdoutReport).toBe(false);
     expect(stdoutReport.summary.recommendation).toBe("pass");
     expect(stdoutReport.error).toBeNull();

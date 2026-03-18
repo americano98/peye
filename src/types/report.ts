@@ -25,6 +25,36 @@ export const SUMMARY_ACTION_CODES = [
   "fix_preview_setup",
   "fix_reference_setup",
 ] as const;
+export const DECISION_AXES = [
+  "pixel",
+  "layout",
+  "color",
+  "dimension",
+  "setup_capture_risk",
+  "fixability",
+  "final",
+] as const;
+export const DECISION_STRENGTHS = ["low", "medium", "high", "critical"] as const;
+export const DECISION_TRACE_CODES = [
+  "pixel_strict_pass",
+  "pixel_tolerated_pass",
+  "pixel_retry_range",
+  "pixel_exceeds_retry_range",
+  "layout_localized_drift",
+  "layout_global_drift",
+  "color_localized_drift",
+  "color_global_drift",
+  "dimension_moderate_mismatch",
+  "dimension_strong_mismatch",
+  "setup_capture_signal_risk",
+  "setup_ignored_area_risk",
+  "fixability_localized_actionable",
+  "fixability_diffuse_or_unaddressable",
+  "final_pass",
+  "final_pass_with_tolerated_differences",
+  "final_retry_fix",
+  "final_needs_human_review",
+] as const;
 export const ROOT_CAUSE_CODES = [
   "text_overflow",
   "capture_scope_too_tight",
@@ -60,6 +90,14 @@ export const FINDING_METRIC_KEYS = [
   "dimensionMismatch",
   "meanColorDelta",
 ] as const;
+export const DECISION_TRACE_METRIC_KEYS = [
+  "mismatchPercent",
+  "structuralMismatchPercent",
+  "meanColorDelta",
+  "maxColorDelta",
+  "ignoredPercent",
+  "dimensionMismatch",
+] as const;
 export const FINDING_ARTIFACT_KEYS = ["heatmap", "diff"] as const;
 export const SIGNAL_CONFIDENCES = ["low", "medium", "high"] as const;
 
@@ -68,9 +106,13 @@ export type AnalysisMode = (typeof ANALYSIS_MODES)[number];
 export type FindingSignalCode = (typeof FINDING_SIGNAL_CODES)[number];
 export type FindingCode = (typeof FINDING_CODES)[number];
 export type SummaryActionCode = (typeof SUMMARY_ACTION_CODES)[number];
+export type DecisionAxis = (typeof DECISION_AXES)[number];
+export type DecisionStrength = (typeof DECISION_STRENGTHS)[number];
+export type DecisionTraceCode = (typeof DECISION_TRACE_CODES)[number];
 export type RootCauseCode = (typeof ROOT_CAUSE_CODES)[number];
 export type AffectedPropertyCode = (typeof AFFECTED_PROPERTY_CODES)[number];
 export type FindingMetricKey = (typeof FINDING_METRIC_KEYS)[number];
+export type DecisionTraceMetricKey = (typeof DECISION_TRACE_METRIC_KEYS)[number];
 export type FindingArtifactKey = (typeof FINDING_ARTIFACT_KEYS)[number];
 export type SignalConfidence = (typeof SIGNAL_CONFIDENCES)[number];
 
@@ -165,6 +207,7 @@ export interface SummaryReport {
   recommendation: Recommendation;
   severity: Severity;
   reason: string;
+  decisionTrace: DecisionTraceReport[];
   topActions: SummaryActionReport[];
   rootCauseCandidates: SummaryRootCauseReport[];
   overallConfidence: number;
@@ -230,6 +273,17 @@ export interface SummaryRootCauseReport {
   reason: string;
   findingIds: string[];
   signalCodes: FindingSignalCode[];
+}
+
+export interface DecisionTraceReport {
+  axis: DecisionAxis;
+  code: DecisionTraceCode;
+  outcome: Recommendation;
+  strength: DecisionStrength;
+  reason: string;
+  findingIds: string[];
+  signalCodes: FindingSignalCode[];
+  metricKeys: DecisionTraceMetricKey[];
 }
 
 export interface FindingReport {

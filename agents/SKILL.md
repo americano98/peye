@@ -21,7 +21,7 @@ Use `peye` when an agent needs to:
 ## Agent Stance
 
 - Treat `report.json` as the primary result.
-- Trust `summary.topActions`, `summary.rootCauseCandidates`, `summary.safeToAutofix`, `summary.requiresRecapture`, `error.code`, and `findings` more than your visual guess from the PNGs.
+- Trust `summary.decisionTrace`, `summary.topActions`, `summary.rootCauseCandidates`, `summary.safeToAutofix`, `summary.requiresRecapture`, `error.code`, and `findings` more than your visual guess from the PNGs.
 - Use `heatmap.png`, `overlay.png`, and `diff.png` as supporting evidence, not the main contract.
 - If `recommendation` is `retry_fix` and the agent is actively implementing that UI, the default action is to try to improve the implementation and rerun.
 - If `recommendation` is `needs_human_review`, do not keep auto-tuning blindly. First verify setup: viewport, selector, reference target, and capture scope.
@@ -139,6 +139,7 @@ peye compare \
 Read these first:
 
 - `summary.recommendation`
+- `summary.decisionTrace`
 - `summary.topActions`
 - `summary.rootCauseCandidates`
 - `summary.safeToAutofix`
@@ -158,6 +159,7 @@ Use these fields for diagnosis:
 - `metrics.mismatchPercent`: overall mismatch level
 - `metrics.ignoredPixels` and `metrics.ignoredPercent`: excluded area from `--ignore-selector`
 - `metrics.structuralMismatchPercent`: layout-sensitive drift
+- `summary.decisionTrace[]`: fixed-order explanation of which matrix rules fired and why
 - `findings[]`: main actionable mismatches
 - `findings[].code`: stable mismatch taxonomy
 - `findings[].fixHint`: short next-step hint
@@ -182,9 +184,10 @@ When using `peye` during implementation:
    - wrong area captured
    - missing ignore selector for obvious page noise
 4. If `summary.requiresRecapture` is `true`, fix setup or recapture before changing implementation code.
-5. If setup is sound and `summary.topActions[0]` points at a concrete DOM target, use that as the default next fix.
-6. Rerun `peye` into the same cleaned scratch directory.
-7. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
+5. If setup is sound, read `summary.decisionTrace[0]` to understand why the matrix chose the current verdict.
+6. If setup is sound and `summary.topActions[0]` points at a concrete DOM target, use that as the default next fix.
+7. Rerun `peye` into the same cleaned scratch directory.
+8. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
 
 Do not keep editing forever on a `needs_human_review` result unless the cause is clearly understood.
 

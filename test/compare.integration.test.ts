@@ -111,15 +111,20 @@ describe("runCompare integration", () => {
         preview: previewPath,
         reference: referencePath,
         output: path.join(dir, "out"),
+        mode: "layout",
       }),
     );
 
     expect("reportVersion" in result.report).toBe(false);
     expect(result.report.analysisMode).toBe("visual-clusters");
     expect(result.report.summary.recommendation).toBe("pass");
+    expect(result.report.summary.decisionTrace.map((trace) => trace.code)).toEqual([
+      "pixel_strict_pass",
+      "final_pass",
+    ]);
     expect(result.report.summary.topActions).toEqual([]);
     expect(result.report.summary.rootCauseCandidates).toEqual([]);
-    expect(result.report.summary.overallConfidence).toBe(0.99);
+    expect(result.report.summary.overallConfidence).toBe(0.85);
     expect(result.report.summary.safeToAutofix).toBe(false);
     expect(result.report.summary.requiresRecapture).toBe(false);
     expect(result.exitCode).toBe(0);
@@ -379,6 +384,10 @@ describe("runCompare integration", () => {
       expect(withoutIgnore.report.metrics.mismatchPercent).toBeGreaterThan(0);
       expect(withoutIgnore.report.metrics.structuralMismatchPercent).toBeGreaterThan(0);
       expect(withIgnore.report.summary.recommendation).toBe("pass");
+      expect(withIgnore.report.summary.decisionTrace.map((trace) => trace.code)).toEqual([
+        "pixel_strict_pass",
+        "final_pass",
+      ]);
       expect(withIgnore.report.findings).toEqual([]);
       expect(withIgnore.report.metrics.mismatchPercent).toBeLessThan(0.01);
       expect(withIgnore.report.metrics.structuralMismatchPercent).toBeLessThan(0.5);
@@ -542,6 +551,16 @@ describe("runCompare integration", () => {
       );
 
       expect(buttonFinding).toBeDefined();
+      expect(result.report.summary.recommendation).toBe("retry_fix");
+      expect(
+        result.report.summary.decisionTrace.some(
+          (trace) => trace.code === "fixability_localized_actionable",
+        ),
+      ).toBe(true);
+      expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
+      expect(
+        result.report.summary.decisionTrace.some((trace) => trace.axis === "setup_capture_risk"),
+      ).toBe(false);
       expect(buttonFinding?.code).toBe("text_clipping");
       expect(buttonFinding?.fixHint).toContain("overflow");
       expect(buttonFinding?.confidence).toBeGreaterThanOrEqual(0.8);
@@ -570,7 +589,7 @@ describe("runCompare integration", () => {
       });
       expect(result.report.summary.topActions[0]?.code).toBe("fix_text_overflow");
       expect(result.report.summary.rootCauseCandidates[0]?.code).toBe("text_overflow");
-      expect(result.report.summary.safeToAutofix).toBe(false);
+      expect(result.report.summary.safeToAutofix).toBe(true);
       expect(result.report.summary.requiresRecapture).toBe(false);
     } finally {
       await server.close();
@@ -798,7 +817,7 @@ describe("runCompare integration", () => {
       outputPath: previewPath,
       width: 100,
       height: 100,
-      body: `<rect x="20" y="10" width="30" height="30" fill="#0b84ff" />`,
+      body: `<rect x="15" y="10" width="30" height="30" fill="#0b84ff" />`,
     });
 
     const result = await runCompare(
@@ -812,9 +831,105 @@ describe("runCompare integration", () => {
     expect(result.report.summary.recommendation).toBe("retry_fix");
     expect(result.exitCode).toBe(2);
     expect(result.report.analysisMode).toBe("visual-clusters");
+    expect(
+      result.report.summary.decisionTrace.some(
+        (trace) => trace.axis === "layout" || trace.axis === "color",
+      ),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.axis === "setup_capture_risk"),
+    ).toBe(false);
     expect(result.report.findings.length).toBeGreaterThan(0);
     expect(result.report.findings[0]?.element).toBeNull();
     expect(Array.isArray(result.report.findings[0]?.hotspots)).toBe(true);
+  });
+
+  test("returns retry_fix for a localized color mismatch without setup-risk traces", async () => {
+    const dir = await createTempDir("peye-color-retry");
+    const previewPath = path.join(dir, "preview.png");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 100,
+      height: 100,
+      body: `<rect x="15" y="15" width="20" height="20" fill="#0b84ff" />`,
+    });
+
+    await createPngFromSvg({
+      outputPath: previewPath,
+      width: 100,
+      height: 100,
+      body: `<rect x="15" y="15" width="20" height="20" fill="#ff6633" />`,
+    });
+
+    const result = await runCompare(
+      await buildOptions({
+        preview: previewPath,
+        reference: referencePath,
+        output: path.join(dir, "out"),
+      }),
+    );
+
+    expect(result.report.summary.recommendation).toBe("retry_fix");
+    expect(result.exitCode).toBe(2);
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.code === "color_localized_drift"),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.axis === "setup_capture_risk"),
+    ).toBe(false);
+  });
+
+  test("returns needs_human_review for global layout drift without recapture", async () => {
+    const dir = await createTempDir("peye-layout-global");
+    const previewPath = path.join(dir, "preview.png");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 200,
+      height: 180,
+      body: `
+        <rect x="20" y="20" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="50" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="80" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="110" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="140" width="160" height="8" fill="#0b84ff" />
+      `,
+    });
+
+    await createPngFromSvg({
+      outputPath: previewPath,
+      width: 200,
+      height: 180,
+      body: `
+        <rect x="20" y="38" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="68" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="98" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="128" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="158" width="160" height="8" fill="#0b84ff" />
+      `,
+    });
+
+    const result = await runCompare(
+      await buildOptions({
+        preview: previewPath,
+        reference: referencePath,
+        output: path.join(dir, "out"),
+        mode: "layout",
+      }),
+    );
+
+    expect(result.report.summary.recommendation).toBe("needs_human_review");
+    expect(result.exitCode).toBe(3);
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.code === "layout_global_drift"),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
+    expect(result.report.summary.requiresRecapture).toBe(false);
   });
 
   test("returns a single dimension finding for large canvas mismatch", async () => {
@@ -847,6 +962,7 @@ describe("runCompare integration", () => {
     expect(result.report.summary.recommendation).toBe("needs_human_review");
     expect(result.exitCode).toBe(3);
     expect(result.report.findings).toHaveLength(1);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
     expect(result.report.summary.topActions[0]?.code).toBe("verify_viewport_or_reference");
     expect(result.report.summary.rootCauseCandidates[0]?.code).toBe(
       "viewport_or_reference_mismatch",
@@ -921,8 +1037,8 @@ describe("runCompare integration", () => {
     expect(result.report.analysisMode).toBe("visual-clusters");
     expect(result.report.rollups.rawRegionCount).toBe(100);
     expect(result.report.metrics.findingsCount).toBe(100);
-    expect(result.report.findings).toHaveLength(20);
-    expect(result.report.rollups.omittedFindings).toBe(80);
+    expect(result.report.findings).toHaveLength(19);
+    expect(result.report.rollups.omittedFindings).toBe(81);
     expect(reportBuffer.byteLength).toBeLessThan(32_000);
   });
 

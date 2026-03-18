@@ -2,6 +2,7 @@ import type {
   AnalysisMode,
   BoundingBox,
   CompareReport,
+  DecisionTraceReport,
   IgnoreSelectorReport,
   RegionKind,
   ReferenceTransport,
@@ -121,6 +122,7 @@ export interface RecommendationDecision {
   recommendation: Recommendation;
   severity: Severity;
   reason: string;
+  decisionTrace: DecisionTraceReport[];
 }
 
 export interface CompletedRun {
