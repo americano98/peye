@@ -215,6 +215,7 @@ peye compare \
 - `findings` is capped to the top actionable mismatches
 - `findings[].id` is stable across reruns for the same normalized issue, and `findings[].rootCauseGroupId` ties each symptom back to a diagnostic blocker
 - `findings[].code`, `findings[].fixHint`, `findings[].likelyAffectedProperties`, and `findings[].actionTarget` expose stable next-step metadata
+- `findings[].element` stays compact as the actionable anchor, while `findings[].context` explains binding quality, ancestry, semantic identity, preview-side computed styles, text layout, visibility, interactivity, and overlap hints
 - `findings[].signals` adds stable heuristic hints such as probable text clipping, capture crop, and viewport mismatch
 - `findings[].evidenceRefs` points back to the exact signals, metrics, hotspots, and artifacts that support each finding
 - `findings[].hotspots` exposes the top mismatch subregions without forcing the caller to inspect images first
@@ -413,18 +414,106 @@ Example `report.json` shape:
         "selector": "section#hero > button#cta",
         "tag": "button",
         "role": null,
+        "testId": "hero-cta",
         "textSnippet": "Buy"
       },
       "element": {
         "tag": "button",
         "selector": "section#hero > button#cta",
         "role": null,
+        "testId": "hero-cta",
         "textSnippet": "Buy",
         "bbox": {
           "x": 20,
           "y": 80,
           "width": 120,
           "height": 36
+        }
+      },
+      "context": {
+        "binding": {
+          "assignmentMethod": "ancestor-proxy",
+          "assignmentConfidence": 0.89,
+          "candidateCount": 2,
+          "overlapScore": 0.8667,
+          "depthScore": 1,
+          "fallbackMarker": "inline-proxy",
+          "selectedCandidate": {
+            "tag": "span",
+            "selector": "section#hero > button#cta > span.label",
+            "role": null,
+            "testId": "hero-label",
+            "domId": null,
+            "classSummary": ["label"]
+          },
+          "anchorElement": {
+            "tag": "button",
+            "selector": "section#hero > button#cta",
+            "role": null,
+            "testId": "hero-cta",
+            "domId": "cta",
+            "classSummary": ["cta", "primary"]
+          }
+        },
+        "semantic": {
+          "ancestry": [
+            {
+              "tag": "section",
+              "selector": "section#hero",
+              "role": null,
+              "testId": null,
+              "domId": "hero",
+              "classSummary": []
+            }
+          ],
+          "identity": {
+            "domId": "cta",
+            "classSummary": ["cta", "primary"],
+            "testId": "hero-cta",
+            "semanticTag": "button",
+            "candidateKind": "anchor"
+          },
+          "computedStyle": {
+            "fontSize": "16px",
+            "lineHeight": "24px",
+            "fontWeight": "400",
+            "color": "rgb(255, 255, 255)",
+            "backgroundColor": "rgb(17, 17, 17)",
+            "borderRadius": "8px",
+            "gap": "0px",
+            "padding": "0px",
+            "width": "120px",
+            "height": "36px",
+            "margin": "0px"
+          },
+          "textLayout": {
+            "lineCount": 1,
+            "wrapState": "overflowing",
+            "hasEllipsis": true,
+            "lineClamp": "none",
+            "overflowsX": true,
+            "overflowsY": false
+          },
+          "visibility": {
+            "isVisible": true,
+            "display": "block",
+            "visibility": "visible",
+            "opacity": 1,
+            "pointerEvents": "auto",
+            "ariaHidden": null
+          },
+          "interactivity": {
+            "isInteractive": true,
+            "disabled": false,
+            "tabIndex": 0,
+            "cursor": "pointer"
+          },
+          "overlapHints": {
+            "topMostAtCenter": "div.overlay",
+            "stackDepthAtCenter": 2,
+            "occludingSelector": "div.overlay",
+            "captureClippedEdges": []
+          }
         }
       }
     }
@@ -505,7 +594,7 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 }
 ```
 
-For automation, prefer `summary.decisionTrace[0]`, `summary.topActions[0]`, `summary.primaryBlockers[0]`, `summary.safeToAutofix`, `summary.requiresRecapture`, `findings[].code`, `findings[].fixHint`, and `findings[].actionTarget` before falling back to `summary.reason`.
+For automation, prefer `summary.decisionTrace[0]`, `summary.topActions[0]`, `summary.primaryBlockers[0]`, `summary.safeToAutofix`, `summary.requiresRecapture`, `findings[].code`, `findings[].fixHint`, `findings[].actionTarget`, and `findings[].context.binding.assignmentConfidence` before falling back to `summary.reason`.
 
 ## Exit Codes
 

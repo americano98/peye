@@ -232,7 +232,7 @@ describe("runCompare integration", () => {
             <body>
               <section id="hero">
                 <h1>Hero</h1>
-                <button id="cta">Buy</button>
+                <button id="cta" class="cta primary" data-testid="hero-cta">Buy</button>
               </section>
             </body>
           </html>
@@ -278,6 +278,16 @@ describe("runCompare integration", () => {
       ]);
       expect(result.report.findings[0]?.element?.bbox.x).toBeLessThan(240);
       expect(result.report.findings[0]?.element?.bbox.y).toBeLessThan(140);
+      const buttonFinding = result.report.findings.find(
+        (finding) => finding.element?.tag === "button",
+      );
+      expect(buttonFinding?.element?.testId).toBe("hero-cta");
+      expect(buttonFinding?.actionTarget?.testId).toBe("hero-cta");
+      expect(buttonFinding?.context?.binding.assignmentMethod).toBe("center-hit");
+      expect(buttonFinding?.context?.binding.selectedCandidate.tag).toBe("button");
+      expect(buttonFinding?.context?.semantic.ancestry[0]?.tag).toBe("section");
+      expect(buttonFinding?.context?.semantic.identity.classSummary).toEqual(["cta", "primary"]);
+      expect(buttonFinding?.context?.semantic.computedStyle.borderRadius).toBe("8px");
       expect(result.report.images).toEqual({
         preview: { width: 240, height: 140 },
         reference: { width: 240, height: 140 },
@@ -524,7 +534,7 @@ describe("runCompare integration", () => {
             </head>
             <body>
               <section id="hero">
-                <button id="cta">Very long button label</button>
+                <button id="cta" data-testid="hero-cta">Very long button label</button>
               </section>
             </body>
           </html>
@@ -573,8 +583,26 @@ describe("runCompare integration", () => {
         selector: "section#hero > button#cta",
         tag: "button",
         role: null,
+        testId: "hero-cta",
         textSnippet: "Very long button label",
       });
+      expect(buttonFinding?.element?.testId).toBe("hero-cta");
+      expect(buttonFinding?.context?.semantic.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "overflowing",
+          hasEllipsis: true,
+          lineClamp: "none",
+          overflowsX: true,
+        }),
+      );
+      expect(buttonFinding?.context?.semantic.computedStyle).toEqual(
+        expect.objectContaining({
+          fontSize: "16px",
+          lineHeight: "24px",
+          fontWeight: "400",
+        }),
+      );
       expect(buttonFinding?.evidenceRefs).toEqual([
         { type: "signal", code: "probable_text_clipping" },
         { type: "metric", key: "mismatchPercent" },
@@ -587,6 +615,7 @@ describe("runCompare integration", () => {
         message:
           "Text content likely overflows the element bounds and is being clipped on the horizontal axis.",
       });
+      expect(buttonFinding?.context?.binding.assignmentConfidence).toBeGreaterThan(0.8);
       expect(result.report.summary.topActions[0]?.code).toBe("fix_text_overflow");
       expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe(
         "text-wrap-regression",
@@ -672,6 +701,7 @@ describe("runCompare integration", () => {
         selector: "section#hero > button#cta",
         tag: "button",
         role: null,
+        testId: null,
         textSnippet: "Buy now",
       });
       expect(buttonFinding?.evidenceRefs).toEqual([
@@ -686,6 +716,7 @@ describe("runCompare integration", () => {
         message:
           "Element bounds were clipped by the preview capture on the right edge(s); check selector scope and capture framing.",
       });
+      expect(buttonFinding?.context?.semantic.overlapHints.captureClippedEdges).toEqual(["right"]);
       expect(result.report.summary.topActions[0]?.code).toBe("recapture_with_broader_scope");
       expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
       expect(result.report.summary.safeToAutofix).toBe(false);
@@ -759,6 +790,239 @@ describe("runCompare integration", () => {
       expect(report.artifacts.overlay).toBeNull();
       expect(report.artifacts.diff).toBeNull();
       expect(report.artifacts.heatmap).toBeNull();
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("binds inline text mismatches through an ancestor proxy and exposes overlap hints", async () => {
+    const dir = await createTempDir("peye-inline-proxy");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 180,
+      height: 80,
+      body: `<rect x="20" y="20" width="140" height="36" rx="8" fill="#111111" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 180px; height: 80px; }
+                #hero button {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  width: 140px;
+                  height: 36px;
+                  border: 0;
+                  border-radius: 8px;
+                  background: #111111;
+                  color: #ffffff;
+                  font: 16px/36px monospace;
+                }
+                #hero .label {
+                  color: #ff6633;
+                }
+                #hero .overlay {
+                  position: absolute;
+                  left: 70px;
+                  top: 24px;
+                  width: 24px;
+                  height: 24px;
+                  background: rgba(0, 0, 0, 0);
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button id="cta" data-testid="hero-cta">
+                  <span class="label" data-testid="hero-label">Buy now</span>
+                </button>
+                <div class="overlay"></div>
+              </section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+      const buttonFinding = result.report.findings.find(
+        (finding) => finding.element?.tag === "button",
+      );
+
+      expect(buttonFinding).toBeDefined();
+      expect(buttonFinding?.element?.testId).toBe("hero-cta");
+      expect(buttonFinding?.context?.binding.assignmentMethod).toBe("ancestor-proxy");
+      expect(buttonFinding?.context?.binding.fallbackMarker).toBe("inline-proxy");
+      expect(buttonFinding?.context?.binding.selectedCandidate.tag).toBe("span");
+      expect(buttonFinding?.context?.binding.selectedCandidate.testId).toBe("hero-label");
+      expect(buttonFinding?.context?.binding.anchorElement.testId).toBe("hero-cta");
+      expect(buttonFinding?.context?.semantic.overlapHints.topMostAtCenter).toContain(".overlay");
+      expect(buttonFinding?.context?.semantic.overlapHints.occludingSelector).toContain(".overlay");
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("preserves visible but non-interactive targets in semantic context", async () => {
+    const dir = await createTempDir("peye-non-interactive");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 140,
+      height: 60,
+      body: `<rect x="10" y="10" width="120" height="28" rx="4" fill="#111111" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 140px; height: 60px; }
+                #hero button {
+                  position: absolute;
+                  left: 10px;
+                  top: 10px;
+                  width: 120px;
+                  height: 28px;
+                  border: 0;
+                  border-radius: 4px;
+                  background: #ff6633;
+                  color: #ffffff;
+                  font: 14px/28px monospace;
+                  pointer-events: none;
+                  cursor: pointer;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button id="cta">Buy</button>
+              </section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+      const buttonFinding = result.report.findings.find(
+        (finding) => finding.element?.tag === "button",
+      );
+
+      expect(buttonFinding).toBeDefined();
+      expect(buttonFinding?.context?.semantic.visibility.isVisible).toBe(true);
+      expect(buttonFinding?.context?.semantic.visibility.pointerEvents).toBe("none");
+      expect(buttonFinding?.context?.semantic.interactivity.isInteractive).toBe(false);
+      expect(buttonFinding?.context?.semantic.interactivity.cursor).toBe("pointer");
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("falls back to selector root when no meaningful child anchor exists", async () => {
+    const dir = await createTempDir("peye-root-fallback");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 140,
+      height: 80,
+      body: `<rect x="0" y="0" width="140" height="80" fill="#0b84ff" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero {
+                  width: 140px;
+                  height: 80px;
+                  background: #ff6633;
+                }
+                #hero .label {
+                  display: inline-block;
+                  margin: 6px;
+                  color: #ffffff;
+                  font: 14px/18px monospace;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero"><span class="label">Hero</span></section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+      const rootFinding = result.report.findings.find(
+        (finding) => finding.element?.selector === "section#hero",
+      );
+
+      expect(result.report.error).toBeNull();
+      expect(rootFinding).toBeDefined();
+      expect(rootFinding?.element?.tag).toBe("section");
+      expect(rootFinding?.actionTarget?.selector).toBe("section#hero");
+      expect(rootFinding?.context?.binding.assignmentMethod).toBe("center-hit");
+      expect(rootFinding?.context?.binding.anchorElement.selector).toBe("section#hero");
     } finally {
       await server.close();
     }

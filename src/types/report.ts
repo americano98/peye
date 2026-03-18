@@ -135,6 +135,15 @@ export type Recommendation =
   | "needs_human_review";
 
 export type Severity = "low" | "medium" | "high" | "critical";
+export type CaptureEdge = "top" | "right" | "bottom" | "left";
+export type FindingAssignmentMethod = "center-hit" | "overlap-best-fit" | "ancestor-proxy";
+export type FindingAssignmentFallbackMarker =
+  | "none"
+  | "weak-overlap"
+  | "inline-proxy"
+  | "anchor-fallback";
+export type DomCandidateKind = "anchor" | "inline-descendant" | "leaf-proxy";
+export type TextWrapState = "clamped" | "overflowing" | "wrapped" | "single-line" | "unknown";
 
 export type RegionKind = "pixel" | "color" | "layout" | "mixed" | "dimension";
 export type InputSourceKind = "url" | "path" | "figma-url";
@@ -237,6 +246,7 @@ export interface FindingElementReport {
   tag: string;
   selector: string;
   role: string | null;
+  testId: string | null;
   textSnippet: string | null;
   bbox: BoundingBox;
 }
@@ -251,7 +261,97 @@ export interface ActionTargetReport {
   selector: string;
   tag: string;
   role: string | null;
+  testId: string | null;
   textSnippet: string | null;
+}
+
+export interface ElementLocatorReport {
+  tag: string;
+  selector: string;
+  role: string | null;
+  testId: string | null;
+  domId: string | null;
+  classSummary: string[];
+}
+
+export interface ElementIdentityReport {
+  domId: string | null;
+  classSummary: string[];
+  testId: string | null;
+  semanticTag: string | null;
+  candidateKind: DomCandidateKind;
+}
+
+export interface ComputedStyleSubsetReport {
+  fontSize: string;
+  lineHeight: string;
+  fontWeight: string;
+  color: string;
+  backgroundColor: string;
+  borderRadius: string;
+  gap: string;
+  padding: string;
+  width: string;
+  height: string;
+  margin: string;
+}
+
+export interface TextLayoutReport {
+  lineCount: number;
+  wrapState: TextWrapState;
+  hasEllipsis: boolean;
+  lineClamp: string | null;
+  overflowsX: boolean;
+  overflowsY: boolean;
+}
+
+export interface VisibilityStateReport {
+  isVisible: boolean;
+  display: string;
+  visibility: string;
+  opacity: number;
+  pointerEvents: string;
+  ariaHidden: boolean | null;
+}
+
+export interface InteractivityStateReport {
+  isInteractive: boolean;
+  disabled: boolean | null;
+  tabIndex: number | null;
+  cursor: string;
+}
+
+export interface OverlapHintsReport {
+  topMostAtCenter: string | null;
+  stackDepthAtCenter: number;
+  occludingSelector: string | null;
+  captureClippedEdges: CaptureEdge[];
+}
+
+export interface FindingBindingReport {
+  assignmentMethod: FindingAssignmentMethod;
+  assignmentConfidence: number;
+  candidateCount: number;
+  overlapScore: number;
+  depthScore: number;
+  fallbackMarker: FindingAssignmentFallbackMarker;
+  selectedCandidate: ElementLocatorReport;
+  anchorElement: ElementLocatorReport;
+}
+
+export interface FindingSemanticContextReport {
+  ancestry: ElementLocatorReport[];
+  identity: ElementIdentityReport;
+  computedStyle: ComputedStyleSubsetReport;
+  textLayout: TextLayoutReport | null;
+  visibility: VisibilityStateReport;
+  interactivity: InteractivityStateReport;
+  overlapHints: OverlapHintsReport;
+}
+
+export interface FindingContextReport {
+  binding: FindingBindingReport;
+  semantic: FindingSemanticContextReport;
 }
 
 export type FindingEvidenceRefReport =
@@ -324,6 +424,7 @@ export interface FindingReport {
   hotspots: BoundingBox[];
   actionTarget: ActionTargetReport | null;
   element: FindingElementReport | null;
+  context: FindingContextReport | null;
 }
 
 export interface SeverityRollup {

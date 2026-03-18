@@ -41,16 +41,45 @@ function createMetrics(
 }
 
 function createFinding(
-  overrides: Partial<FindingReport> & Pick<FindingReport, "kind" | "severity">,
+  overrides: Omit<Partial<FindingReport>, "actionTarget" | "element" | "context"> & {
+    actionTarget?: Partial<NonNullable<FindingReport["actionTarget"]>> | null;
+    element?: Partial<NonNullable<FindingReport["element"]>> | null;
+    context?: FindingReport["context"];
+  } & Pick<FindingReport, "kind" | "severity">,
 ): FindingReport {
   const code = overrides.code ?? "rendering_mismatch";
   const signals = overrides.signals ?? [];
+  const element =
+    overrides.element === undefined || overrides.element === null
+      ? null
+      : {
+          tag: overrides.element.tag ?? "button",
+          selector: overrides.element.selector ?? "#target",
+          role: overrides.element.role ?? null,
+          testId: overrides.element.testId ?? null,
+          textSnippet: overrides.element.textSnippet ?? null,
+          bbox: overrides.element.bbox ?? {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 20,
+          },
+        };
+  const actionTarget =
+    overrides.actionTarget === undefined || overrides.actionTarget === null
+      ? null
+      : {
+          selector: overrides.actionTarget.selector ?? "#target",
+          tag: overrides.actionTarget.tag ?? "button",
+          role: overrides.actionTarget.role ?? null,
+          testId: overrides.actionTarget.testId ?? null,
+          textSnippet: overrides.actionTarget.textSnippet ?? null,
+        };
 
   return {
     id: overrides.id ?? "finding-test-001",
     rootCauseGroupId:
-      overrides.rootCauseGroupId ??
-      rootCauseGroupIdForTestFinding(code, signals, overrides.element),
+      overrides.rootCauseGroupId ?? rootCauseGroupIdForTestFinding(code, signals, element),
     source: overrides.source ?? "visual-cluster",
     kind: overrides.kind,
     code,
@@ -72,8 +101,9 @@ function createFinding(
     signals,
     evidenceRefs: overrides.evidenceRefs ?? [],
     hotspots: overrides.hotspots ?? [],
-    actionTarget: overrides.actionTarget ?? null,
-    element: overrides.element ?? null,
+    actionTarget,
+    element,
+    context: overrides.context ?? null,
   };
 }
 
@@ -479,46 +509,177 @@ function createRegion(
 function createDomSnapshotForTest(
   elementOverrides: Partial<DomSnapshot["elements"][number]> = {},
 ): DomSnapshot {
-  return {
-    root: {
-      id: "root",
+  const root = {
+    id: "root",
+    tag: "main",
+    selector: "#root",
+    role: null,
+    testId: null,
+    domId: "root",
+    classSummary: ["hero-root"],
+    textSnippet: null,
+    bbox: {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 60,
+    },
+    depth: 0,
+    captureClippedEdges: [],
+    textMetrics: null,
+    ancestry: [],
+    locator: {
       tag: "main",
       selector: "#root",
       role: null,
-      textSnippet: null,
-      bbox: {
-        x: 0,
-        y: 0,
-        width: 100,
-        height: 60,
-      },
-      depth: 0,
-      captureClippedEdges: [],
-      textMetrics: null,
+      testId: null,
+      domId: "root",
+      classSummary: ["hero-root"],
     },
-    elements: [
-      {
-        id: "cta",
-        tag: "button",
-        selector: "section#hero > button#cta",
-        role: "button",
-        textSnippet: "Buy now",
-        bbox: {
-          x: 8,
-          y: 8,
-          width: 40,
-          height: 18,
-        },
-        depth: 1,
-        captureClippedEdges: [],
-        textMetrics: null,
-        ...elementOverrides,
-      },
-    ],
+    identity: {
+      domId: "root",
+      classSummary: ["hero-root"],
+      testId: null,
+      semanticTag: "main",
+      candidateKind: "anchor" as const,
+    },
+    computedStyle: {
+      fontSize: "16px",
+      lineHeight: "24px",
+      fontWeight: "400",
+      color: "rgb(0, 0, 0)",
+      backgroundColor: "rgba(0, 0, 0, 0)",
+      borderRadius: "0px",
+      gap: "0px",
+      padding: "0px",
+      width: "100px",
+      height: "60px",
+      margin: "0px",
+    },
+    textLayout: null,
+    visibility: {
+      isVisible: true,
+      display: "block",
+      visibility: "visible",
+      opacity: 1,
+      pointerEvents: "auto",
+      ariaHidden: null,
+    },
+    interactivity: {
+      isInteractive: false,
+      disabled: null,
+      tabIndex: -1,
+      cursor: "auto",
+    },
+    overlapHints: {
+      topMostAtCenter: null,
+      stackDepthAtCenter: 0,
+      occludingSelector: null,
+      captureClippedEdges: [],
+    },
+    candidateKind: "anchor" as const,
+    anchorElementId: "root",
+  };
+  const element = {
+    id: "cta",
+    tag: "button",
+    selector: "section#hero > button#cta",
+    role: "button",
+    testId: null,
+    domId: "cta",
+    classSummary: ["cta"],
+    textSnippet: "Buy now",
+    bbox: {
+      x: 8,
+      y: 8,
+      width: 40,
+      height: 18,
+    },
+    depth: 1,
+    captureClippedEdges: [],
+    textMetrics: null,
+    ancestry: [root.locator],
+    locator: {
+      tag: "button",
+      selector: "section#hero > button#cta",
+      role: "button",
+      testId: null,
+      domId: "cta",
+      classSummary: ["cta"],
+    },
+    identity: {
+      domId: "cta",
+      classSummary: ["cta"],
+      testId: null,
+      semanticTag: "button",
+      candidateKind: "anchor" as const,
+    },
+    computedStyle: {
+      fontSize: "16px",
+      lineHeight: "24px",
+      fontWeight: "400",
+      color: "rgb(0, 0, 0)",
+      backgroundColor: "rgba(0, 0, 0, 0)",
+      borderRadius: "0px",
+      gap: "0px",
+      padding: "0px",
+      width: "40px",
+      height: "18px",
+      margin: "0px",
+    },
+    textLayout: {
+      lineCount: 1,
+      wrapState: "single-line" as const,
+      hasEllipsis: false,
+      lineClamp: null,
+      overflowsX: false,
+      overflowsY: false,
+    },
+    visibility: {
+      isVisible: true,
+      display: "block",
+      visibility: "visible",
+      opacity: 1,
+      pointerEvents: "auto",
+      ariaHidden: null,
+    },
+    interactivity: {
+      isInteractive: true,
+      disabled: false,
+      tabIndex: 0,
+      cursor: "pointer",
+    },
+    overlapHints: {
+      topMostAtCenter: "section#hero > button#cta",
+      stackDepthAtCenter: 1,
+      occludingSelector: null,
+      captureClippedEdges: [],
+    },
+    candidateKind: "anchor" as const,
+    anchorElementId: "cta",
+    ...elementOverrides,
+  };
+
+  return {
+    root,
+    elements: [element],
+    bindingCandidates: [element],
   };
 }
 
 describe("buildFindingsAnalysis", () => {
+  test("keeps context null for visual-cluster findings", () => {
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "visual-clusters",
+      rawRegions: [createRegion({ x: 12, y: 12, width: 6, height: 6, pixelCount: 36 })],
+      domSnapshot: null,
+      width: 120,
+      height: 80,
+    });
+
+    expect(analysis.findings[0]?.context).toBeNull();
+  });
+
   test("keeps stable finding ids across runs and input reordering", () => {
     const rawRegions = [
       createRegion({ x: 60, y: 12, width: 6, height: 6, pixelCount: 36 }),
@@ -607,6 +768,127 @@ describe("buildFindingsAnalysis", () => {
       "possible_capture_crop",
     ]);
     expect(analysis.findings[0]?.rootCauseGroupId).toBe("text-wrap-regression");
+    expect(analysis.findings[0]?.context?.semantic.textLayout).toEqual(
+      expect.objectContaining({
+        lineCount: 1,
+        wrapState: "single-line",
+        hasEllipsis: false,
+      }),
+    );
+    expect(analysis.findings[0]?.context?.semantic.computedStyle.fontSize).toBe("16px");
+  });
+
+  test("emits center-hit binding diagnostics for strong anchor matches", () => {
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [createRegion({ x: 10, y: 10, width: 12, height: 8, pixelCount: 96 })],
+      domSnapshot: createDomSnapshotForTest(),
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.context?.binding).toEqual(
+      expect.objectContaining({
+        assignmentMethod: "center-hit",
+        candidateCount: 1,
+        fallbackMarker: "none",
+      }),
+    );
+    expect(analysis.findings[0]?.context?.binding.selectedCandidate.tag).toBe("button");
+    expect(analysis.findings[0]?.context?.binding.anchorElement.tag).toBe("button");
+  });
+
+  test("emits ancestor-proxy diagnostics when an inline descendant wins the binding", () => {
+    const baseSnapshot = createDomSnapshotForTest();
+    const anchor = baseSnapshot.elements[0];
+    const proxy = {
+      ...anchor,
+      id: "label",
+      tag: "span",
+      selector: "section#hero > button#cta > span.label",
+      testId: "hero-label",
+      domId: null,
+      classSummary: ["label"],
+      bbox: {
+        x: 10,
+        y: 10,
+        width: 18,
+        height: 8,
+      },
+      depth: 2,
+      ancestry: [anchor.locator, baseSnapshot.root.locator],
+      locator: {
+        tag: "span",
+        selector: "section#hero > button#cta > span.label",
+        role: null,
+        testId: "hero-label",
+        domId: null,
+        classSummary: ["label"],
+      },
+      identity: {
+        domId: null,
+        classSummary: ["label"],
+        testId: "hero-label",
+        semanticTag: "button",
+        candidateKind: "inline-descendant" as const,
+      },
+      overlapHints: {
+        topMostAtCenter: "section#hero > button#cta > span.label",
+        stackDepthAtCenter: 1,
+        occludingSelector: null,
+        captureClippedEdges: [],
+      },
+      candidateKind: "inline-descendant" as const,
+      anchorElementId: anchor.id,
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [createRegion({ x: 12, y: 10, width: 10, height: 8, pixelCount: 80 })],
+      domSnapshot: {
+        ...baseSnapshot,
+        bindingCandidates: [proxy, anchor],
+      },
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.element?.tag).toBe("button");
+    expect(analysis.findings[0]?.context?.binding).toEqual(
+      expect.objectContaining({
+        assignmentMethod: "ancestor-proxy",
+        fallbackMarker: "inline-proxy",
+      }),
+    );
+    expect(analysis.findings[0]?.context?.binding.selectedCandidate.tag).toBe("span");
+    expect(analysis.findings[0]?.context?.binding.anchorElement.tag).toBe("button");
+  });
+
+  test("emits weak overlap fallback diagnostics for low-confidence overlap matches", () => {
+    const baseSnapshot = createDomSnapshotForTest({
+      bbox: {
+        x: 8,
+        y: 8,
+        width: 10,
+        height: 10,
+      },
+    });
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [createRegion({ x: 0, y: 8, width: 10, height: 10, pixelCount: 100 })],
+      domSnapshot: baseSnapshot,
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.context?.binding).toEqual(
+      expect.objectContaining({
+        assignmentMethod: "overlap-best-fit",
+        candidateCount: 1,
+        fallbackMarker: "weak-overlap",
+        overlapScore: 0.2,
+      }),
+    );
+    expect(analysis.findings[0]?.context?.binding.assignmentConfidence).toBeLessThan(0.7);
   });
 });
 

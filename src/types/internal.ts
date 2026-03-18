@@ -1,13 +1,22 @@
 import type {
   AnalysisMode,
   BoundingBox,
+  CaptureEdge,
+  ComputedStyleSubsetReport,
   CompareReport,
   DecisionTraceReport,
+  DomCandidateKind,
+  ElementIdentityReport,
+  ElementLocatorReport,
   IgnoreSelectorReport,
+  InteractivityStateReport,
+  OverlapHintsReport,
   RegionKind,
   ReferenceTransport,
   Recommendation,
   Severity,
+  TextLayoutReport,
+  VisibilityStateReport,
   Viewport,
 } from "./report.js";
 
@@ -15,8 +24,6 @@ interface ResolvedInput {
   input: string;
   resolved: string;
 }
-
-export type CaptureEdge = "top" | "right" | "bottom" | "left";
 
 export interface UrlPreviewInput extends ResolvedInput {
   kind: "url";
@@ -73,16 +80,32 @@ export interface DomSnapshotElement {
   tag: string;
   selector: string;
   role: string | null;
+  testId: string | null;
+  domId: string | null;
+  classSummary: string[];
   textSnippet: string | null;
   bbox: BoundingBox;
   depth: number;
   captureClippedEdges: CaptureEdge[];
   textMetrics: DomTextMetrics | null;
+  ancestry: ElementLocatorReport[];
+  locator: ElementLocatorReport;
+  identity: ElementIdentityReport;
+  computedStyle: ComputedStyleSubsetReport;
+  textLayout: TextLayoutReport | null;
+  visibility: VisibilityStateReport;
+  interactivity: InteractivityStateReport;
+  overlapHints: OverlapHintsReport;
+  candidateKind: DomCandidateKind;
+  anchorElementId: string;
 }
+
+export type DomBindingCandidate = DomSnapshotElement;
 
 export interface DomSnapshot {
   root: DomSnapshotElement;
   elements: DomSnapshotElement[];
+  bindingCandidates: DomBindingCandidate[];
 }
 
 export interface PreparedPreviewImage extends PreparedImage {

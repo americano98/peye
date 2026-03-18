@@ -9,16 +9,18 @@ import {
 } from "../config/defaults.js";
 import type {
   ComparisonRegion,
+  DomBindingCandidate,
   DomSnapshot,
   DomSnapshotElement,
-  CaptureEdge,
 } from "../types/internal.js";
 import type {
   ActionTargetReport,
   AffectedPropertyCode,
   AnalysisMode,
   BoundingBox,
+  CaptureEdge,
   FindingCode,
+  FindingContextReport,
   FindingElementReport,
   FindingEvidenceRefReport,
   FindingReport,
@@ -60,11 +62,20 @@ interface DraftFinding {
   hotspots: BoundingBox[];
   actionTarget: ActionTargetReport | null;
   element: FindingElementReport | null;
+  context: FindingContextReport | null;
 }
 
 interface DraftFindingGroup {
   finding: DraftFinding;
   regions: ComparisonRegion[];
+}
+
+interface DomAssignmentResult {
+  candidate: DomBindingCandidate;
+  anchor: DomSnapshotElement;
+  context: FindingContextReport;
+  assignmentConfidence: number;
+  region: ComparisonRegion;
 }
 
 export interface FindingVisualization {
@@ -74,6 +85,7 @@ export interface FindingVisualization {
 }
 
 const FINDING_KIND_ORDER: RegionKind[] = ["dimension", "mixed", "layout", "color", "pixel"];
+const WEAK_DOM_ASSIGNMENT_THRESHOLD = 0.1;
 
 export function buildFindingsAnalysis(params: {
   analysisMode: AnalysisMode;
@@ -347,39 +359,49 @@ function buildDomFindings(
     return [];
   }
 
-  const candidates = buildDomCandidates(domSnapshot, width, height);
-  const regionsByElement = new Map<string, ComparisonRegion[]>();
-  const elementsById = new Map(candidates.map((element) => [element.id, element]));
+  const anchorsById = new Map(
+    [domSnapshot.root, ...domSnapshot.elements].map((element) => [element.id, element]),
+  );
+  const groupsByAnchorId = new Map<
+    string,
+    {
+      anchor: DomSnapshotElement;
+      regions: ComparisonRegion[];
+      assignments: DomAssignmentResult[];
+    }
+  >();
 
   for (const region of rawRegions) {
-    const element = resolveDomElementForRegion(region, candidates);
-    const existing = regionsByElement.get(element.id);
+    const assignment = resolveDomAssignmentForRegion(
+      region,
+      domSnapshot.bindingCandidates,
+      anchorsById,
+    );
+    const existing = groupsByAnchorId.get(assignment.anchor.id);
 
     if (existing) {
-      existing.push(region);
+      existing.regions.push(region);
+      existing.assignments.push(assignment);
     } else {
-      regionsByElement.set(element.id, [region]);
+      groupsByAnchorId.set(assignment.anchor.id, {
+        anchor: assignment.anchor,
+        regions: [region],
+        assignments: [assignment],
+      });
     }
   }
 
-  return Array.from(regionsByElement.entries(), ([elementId, regions]) => {
-    const element = elementsById.get(elementId);
-
-    if (!element) {
-      throw new AppError(`DOM element snapshot missing for finding group ${elementId}.`, {
-        exitCode: 3,
-        recommendation: "needs_human_review",
-        severity: "high",
-        code: "dom_snapshot_element_missing",
-      });
-    }
+  return Array.from(groupsByAnchorId.values(), ({ anchor, regions, assignments }) => {
+    const representativeAssignment = selectRepresentativeDomAssignment(assignments);
 
     return {
       finding: buildDraftFinding({
         source: "dom-element",
         regions,
         totalPixels,
-        element,
+        element: anchor,
+        signalElement: representativeAssignment.candidate,
+        context: representativeAssignment.context,
         canvasWidth: width,
         canvasHeight: height,
       }),
@@ -405,6 +427,8 @@ function buildVisualClusterFindings(
       regions: cluster,
       totalPixels,
       element: null,
+      signalElement: null,
+      context: null,
       canvasWidth: width,
       canvasHeight: height,
     }),
@@ -417,6 +441,8 @@ function buildDraftFinding(params: {
   regions: ComparisonRegion[];
   totalPixels: number;
   element: DomSnapshotElement | null;
+  signalElement: DomSnapshotElement | null;
+  context: FindingContextReport | null;
   canvasWidth: number;
   canvasHeight: number;
 }): DraftFinding {
@@ -429,7 +455,7 @@ function buildDraftFinding(params: {
   const signals = buildFindingSignals({
     kind,
     bbox,
-    element: params.element,
+    element: params.signalElement,
     canvasWidth: params.canvasWidth,
     canvasHeight: params.canvasHeight,
   });
@@ -470,96 +496,169 @@ function buildDraftFinding(params: {
     hotspots,
     actionTarget,
     element: elementReport,
+    context: params.context,
   };
 }
 
-function buildDomCandidates(
-  domSnapshot: DomSnapshot,
-  width: number,
-  height: number,
-): DomSnapshotElement[] {
-  const root: DomSnapshotElement = {
-    ...domSnapshot.root,
-    bbox: {
-      x: 0,
-      y: 0,
-      width,
-      height,
-    },
-  };
+function selectRepresentativeDomAssignment(
+  assignments: DomAssignmentResult[],
+): DomAssignmentResult {
+  return assignments.slice().sort((left, right) => {
+    if (left.assignmentConfidence !== right.assignmentConfidence) {
+      return right.assignmentConfidence - left.assignmentConfidence;
+    }
 
-  return [root, ...domSnapshot.elements];
+    if (left.region.pixelCount !== right.region.pixelCount) {
+      return right.region.pixelCount - left.region.pixelCount;
+    }
+
+    return left.anchor.selector.localeCompare(right.anchor.selector);
+  })[0];
 }
 
-function resolveDomElementForRegion(
+function resolveDomAssignmentForRegion(
   region: ComparisonRegion,
-  candidates: DomSnapshotElement[],
-): DomSnapshotElement {
+  candidates: DomBindingCandidate[],
+  anchorsById: Map<string, DomSnapshotElement>,
+): DomAssignmentResult {
   const centerX = region.x + region.width / 2;
   const centerY = region.y + region.height / 2;
-  const containing = candidates.filter((candidate) =>
-    containsPoint(candidate.bbox, centerX, centerY),
-  );
-
-  if (containing.length > 0) {
-    return containing.sort(compareDomCandidates)[0];
-  }
-
   const regionBox = {
     x: region.x,
     y: region.y,
     width: region.width,
     height: region.height,
   };
-  let bestCandidate: DomSnapshotElement | null = null;
-  let bestOverlap = 0;
+  const centerHitCandidates = candidates
+    .filter((candidate) => containsPoint(candidate.bbox, centerX, centerY))
+    .map((candidate) => ({
+      candidate,
+      overlapScore: overlapRatio(regionBox, candidate.bbox),
+    }));
+  const overlapCandidates =
+    centerHitCandidates.length > 0
+      ? centerHitCandidates
+      : candidates
+          .map((candidate) => ({
+            candidate,
+            overlapScore: overlapRatio(regionBox, candidate.bbox),
+          }))
+          .filter(({ overlapScore }) => overlapScore > 0);
+  const shortlist = overlapCandidates.slice().sort(compareBindingCandidates);
 
-  for (const candidate of candidates) {
-    const overlap = overlapRatio(regionBox, candidate.bbox);
-
-    if (overlap > bestOverlap) {
-      bestCandidate = candidate;
-      bestOverlap = overlap;
-      continue;
-    }
-
-    if (
-      overlap === bestOverlap &&
-      bestCandidate &&
-      compareDomCandidates(candidate, bestCandidate) < 0
-    ) {
-      bestCandidate = candidate;
-    }
+  if (shortlist.length === 0) {
+    throw new AppError(
+      `Could not assign mismatch region at (${region.x}, ${region.y}, ${region.width}x${region.height}) to a DOM element.`,
+      {
+        exitCode: 3,
+        recommendation: "needs_human_review",
+        severity: "high",
+        code: "dom_region_assignment_failed",
+      },
+    );
   }
 
-  if (bestCandidate && bestOverlap >= DEFAULT_DOM_OVERLAP_THRESHOLD) {
-    return bestCandidate;
+  const selected = shortlist[0];
+  const isCenterHit = centerHitCandidates.length > 0;
+
+  if (!isCenterHit && selected.overlapScore < WEAK_DOM_ASSIGNMENT_THRESHOLD) {
+    throw new AppError(
+      `Could not assign mismatch region at (${region.x}, ${region.y}, ${region.width}x${region.height}) to a DOM element.`,
+      {
+        exitCode: 3,
+        recommendation: "needs_human_review",
+        severity: "high",
+        code: "dom_region_assignment_failed",
+      },
+    );
   }
 
-  throw new AppError(
-    `Could not assign mismatch region at (${region.x}, ${region.y}, ${region.width}x${region.height}) to a DOM element.`,
-    {
-      exitCode: 3,
-      recommendation: "needs_human_review",
-      severity: "high",
-      code: "dom_region_assignment_failed",
-    },
+  const anchor = anchorsById.get(selected.candidate.anchorElementId);
+
+  if (!anchor) {
+    throw new AppError(
+      `DOM element snapshot missing for binding anchor ${selected.candidate.anchorElementId}.`,
+      {
+        exitCode: 3,
+        recommendation: "needs_human_review",
+        severity: "high",
+        code: "dom_snapshot_element_missing",
+      },
+    );
+  }
+
+  const maxDepth = Math.max(...shortlist.map(({ candidate }) => candidate.depth), 1);
+  const depthScore = Number((selected.candidate.depth / maxDepth).toFixed(4));
+  const overlapScore = Number(selected.overlapScore.toFixed(4));
+  const assignmentMethod =
+    isCenterHit && selected.candidate.anchorElementId === selected.candidate.id
+      ? "center-hit"
+      : isCenterHit
+        ? "ancestor-proxy"
+        : "overlap-best-fit";
+  const fallbackMarker =
+    selected.candidate.anchorElementId !== selected.candidate.id
+      ? "inline-proxy"
+      : !isCenterHit && overlapScore < DEFAULT_DOM_OVERLAP_THRESHOLD
+        ? "weak-overlap"
+        : !isCenterHit
+          ? "anchor-fallback"
+          : "none";
+  const baseConfidence =
+    assignmentMethod === "center-hit" ? 0.82 : assignmentMethod === "ancestor-proxy" ? 0.7 : 0.58;
+  const assignmentConfidence = roundConfidence(
+    baseConfidence + overlapScore * 0.15 + depthScore * 0.1 - (fallbackMarker !== "none" ? 0.1 : 0),
   );
+
+  return {
+    candidate: selected.candidate,
+    anchor,
+    context: {
+      binding: {
+        assignmentMethod,
+        assignmentConfidence,
+        candidateCount: shortlist.length,
+        overlapScore,
+        depthScore,
+        fallbackMarker,
+        selectedCandidate: selected.candidate.locator,
+        anchorElement: anchor.locator,
+      },
+      semantic: {
+        ancestry: anchor.ancestry,
+        identity: anchor.identity,
+        computedStyle: anchor.computedStyle,
+        textLayout: anchor.textLayout,
+        visibility: anchor.visibility,
+        interactivity: anchor.interactivity,
+        overlapHints: selected.candidate.overlapHints,
+      },
+    },
+    assignmentConfidence,
+    region,
+  };
 }
 
-function compareDomCandidates(left: DomSnapshotElement, right: DomSnapshotElement): number {
-  if (left.depth !== right.depth) {
-    return right.depth - left.depth;
+function compareBindingCandidates(
+  left: { candidate: DomBindingCandidate; overlapScore: number },
+  right: { candidate: DomBindingCandidate; overlapScore: number },
+): number {
+  if (left.candidate.depth !== right.candidate.depth) {
+    return right.candidate.depth - left.candidate.depth;
   }
 
-  const leftArea = left.bbox.width * left.bbox.height;
-  const rightArea = right.bbox.width * right.bbox.height;
+  const leftArea = left.candidate.bbox.width * left.candidate.bbox.height;
+  const rightArea = right.candidate.bbox.width * right.candidate.bbox.height;
 
   if (leftArea !== rightArea) {
     return leftArea - rightArea;
   }
 
-  return left.selector.localeCompare(right.selector);
+  if (left.overlapScore !== right.overlapScore) {
+    return right.overlapScore - left.overlapScore;
+  }
+
+  return left.candidate.selector.localeCompare(right.candidate.selector);
 }
 
 function clusterRegions(
@@ -1097,6 +1196,7 @@ function toElementReport(element: DomSnapshotElement): FindingElementReport {
     tag: element.tag,
     selector: element.selector,
     role: element.role,
+    testId: element.testId,
     textSnippet: element.textSnippet,
     bbox: element.bbox,
   };
@@ -1107,6 +1207,7 @@ function toActionTargetReport(element: DomSnapshotElement): ActionTargetReport {
     selector: element.selector,
     tag: element.tag,
     role: element.role,
+    testId: element.testId,
     textSnippet: element.textSnippet,
   };
 }
