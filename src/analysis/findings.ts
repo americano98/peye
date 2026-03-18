@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DEFAULT_CLUSTER_PADDING_PX,
   DEFAULT_DOM_OVERLAP_THRESHOLD,
@@ -8,46 +9,105 @@ import {
 } from "../config/defaults.js";
 import type {
   ComparisonRegion,
+  DomBindingCandidate,
   DomSnapshot,
   DomSnapshotElement,
-  CaptureEdge,
 } from "../types/internal.js";
 import type {
+  AffectedPropertyCode,
   AnalysisMode,
   BoundingBox,
+  CaptureEdge,
+  ComputedStyleSubsetReport,
+  ElementIdentityReport,
+  ElementLocatorReport,
+  FindingCode,
+  FindingContextReport,
   FindingElementReport,
   FindingReport,
   FindingSignalReport,
   FindingSource,
+  InteractivityStateReport,
   IssueType,
   KindRollup,
+  OmittedRegionRollup,
+  OmittedSelectorRollup,
+  OverlapHintsReport,
   RegionKind,
   RollupsReport,
+  RootCauseGroupId,
   Severity,
   SeverityRollup,
   TagRollup,
+  TextLayoutReport,
+  VisibilityStateReport,
 } from "../types/report.js";
+import { rootCauseGroupIdForFinding } from "./root-cause-groups.js";
 import { AppError } from "../utils/errors.js";
 import { compareSeverityDescending, maxSeverity } from "../utils/severity.js";
 
 interface DraftFinding {
+  rootCauseGroupId: RootCauseGroupId;
   source: FindingSource;
   kind: RegionKind;
+  code: FindingCode;
   severity: Severity;
+  confidence: number;
   summary: string;
+  fixHint: string;
   bbox: BoundingBox;
   regionCount: number;
   mismatchPixels: number;
   mismatchPercentOfCanvas: number;
   issueTypes: IssueType[];
+  likelyAffectedProperties: AffectedPropertyCode[];
   signals: FindingSignalReport[];
   hotspots: BoundingBox[];
-  element: FindingElementReport | null;
+  element?: DetailedFindingElementReport;
+  context?: FindingContextReport;
 }
 
 interface DraftFindingGroup {
   finding: DraftFinding;
   regions: ComparisonRegion[];
+}
+
+interface DomAssignmentResult {
+  candidate: DomBindingCandidate;
+  anchor: DomSnapshotElement;
+  context: DetailedFindingContext;
+  assignmentConfidence: number;
+  region: ComparisonRegion;
+}
+
+interface DetailedFindingBindingReport {
+  assignmentMethod: FindingContextReport["binding"]["assignmentMethod"];
+  assignmentConfidence: number;
+  candidateCount: number;
+  overlapScore: number;
+  depthScore: number;
+  fallbackMarker: Exclude<FindingContextReport["binding"]["fallbackMarker"], undefined> | "none";
+  selectedCandidate: ElementLocatorReport;
+  anchorElement: ElementLocatorReport;
+}
+
+interface DetailedFindingElementReport extends FindingElementReport {
+  bbox: BoundingBox;
+}
+
+interface DetailedFindingSemanticContextReport {
+  ancestry: ElementLocatorReport[];
+  identity: ElementIdentityReport;
+  computedStyle: ComputedStyleSubsetReport;
+  textLayout: TextLayoutReport | null;
+  visibility: VisibilityStateReport;
+  interactivity: InteractivityStateReport;
+  overlapHints: OverlapHintsReport;
+}
+
+interface DetailedFindingContext {
+  binding: DetailedFindingBindingReport;
+  semantic: DetailedFindingSemanticContextReport;
 }
 
 export interface FindingVisualization {
@@ -57,6 +117,7 @@ export interface FindingVisualization {
 }
 
 const FINDING_KIND_ORDER: RegionKind[] = ["dimension", "mixed", "layout", "color", "pixel"];
+const WEAK_DOM_ASSIGNMENT_THRESHOLD = 0.1;
 
 export function buildFindingsAnalysis(params: {
   analysisMode: AnalysisMode;
@@ -66,6 +127,7 @@ export function buildFindingsAnalysis(params: {
   height: number;
 }): {
   findings: FindingReport[];
+  fullFindings: FindingReport[];
   rollups: RollupsReport;
   metrics: {
     findingsCount: number;
@@ -87,9 +149,13 @@ export function buildFindingsAnalysis(params: {
   const sortedGroups = draftFindingGroups.sort((left, right) =>
     compareDraftFindings(left.finding, right.finding),
   );
-  const sortedFindings = sortedGroups.map((group) => group.finding);
-  const limitedGroups = sortedGroups.slice(0, DEFAULT_REPORT_FINDINGS_LIMIT);
-  const limitedFindings = limitedGroups.map((group) => group.finding);
+  const sortedFindings = assignStableFindingIds(
+    sortedGroups.map((group) => group.finding),
+    params.width,
+    params.height,
+  );
+  const limitedFindings = sortedFindings.slice(0, DEFAULT_REPORT_FINDINGS_LIMIT);
+  const omittedFindings = sortedFindings.slice(DEFAULT_REPORT_FINDINGS_LIMIT);
   const affectedElementCount =
     params.analysisMode === "dom-elements"
       ? new Set(
@@ -100,10 +166,8 @@ export function buildFindingsAnalysis(params: {
       : 0;
 
   return {
-    findings: limitedFindings.map((finding, index) => ({
-      id: `finding-${String(index + 1).padStart(3, "0")}`,
-      ...finding,
-    })),
+    findings: limitedFindings,
+    fullFindings: sortedFindings,
     rollups: {
       bySeverity: buildSeverityRollups(sortedFindings),
       byKind: buildKindRollups(sortedFindings),
@@ -114,7 +178,16 @@ export function buildFindingsAnalysis(params: {
       rawRegionCount: params.rawRegions.length,
       findingsCount: sortedFindings.length,
       affectedElementCount,
-      omittedFindings: Math.max(0, sortedFindings.length - limitedFindings.length),
+      omittedFindings: omittedFindings.length,
+      omittedBySeverity: buildSeverityRollups(omittedFindings),
+      omittedByKind: buildKindRollups(omittedFindings),
+      topOmittedSelectors: buildTopOmittedSelectors(omittedFindings),
+      largestOmittedRegions: buildLargestOmittedRegions(omittedFindings),
+      tailAreaPercent: Number(
+        omittedFindings
+          .reduce((sum, finding) => sum + finding.mismatchPercentOfCanvas, 0)
+          .toFixed(4),
+      ),
     },
     metrics: {
       findingsCount: sortedFindings.length,
@@ -130,6 +203,159 @@ export function buildFindingsAnalysis(params: {
       };
     }),
   };
+}
+
+function assignStableFindingIds(
+  findings: DraftFinding[],
+  canvasWidth: number,
+  canvasHeight: number,
+): FindingReport[] {
+  const baseIds = findings.map((finding) =>
+    buildStableFindingBaseId(finding, canvasWidth, canvasHeight),
+  );
+  const collisions = new Map<string, number[]>();
+
+  for (let index = 0; index < baseIds.length; index += 1) {
+    const baseId = baseIds[index];
+    const existing = collisions.get(baseId);
+
+    if (existing) {
+      existing.push(index);
+    } else {
+      collisions.set(baseId, [index]);
+    }
+  }
+
+  const ids = new Array<string>(findings.length);
+
+  for (const [baseId, indexes] of collisions.entries()) {
+    if (indexes.length === 1) {
+      ids[indexes[0]] = baseId;
+      continue;
+    }
+
+    indexes
+      .slice()
+      .sort((leftIndex, rightIndex) =>
+        compareStableIdCollision(findings[leftIndex], findings[rightIndex]),
+      )
+      .forEach((findingIndex, collisionIndex) => {
+        ids[findingIndex] =
+          collisionIndex === 0
+            ? baseId
+            : `${baseId}-${String(collisionIndex + 1).padStart(2, "0")}`;
+      });
+  }
+
+  return findings.map((finding, index) => toFindingReport(ids[index], finding));
+}
+
+function buildStableFindingBaseId(
+  finding: DraftFinding,
+  canvasWidth: number,
+  canvasHeight: number,
+): string {
+  const primaryBox = primaryBoxForFinding(finding);
+  const signature = [
+    finding.code,
+    finding.source,
+    ...normalizeBoxForStableSignature(primaryBox, canvasWidth, canvasHeight),
+    targetKeyForFinding(finding),
+    [...finding.issueTypes].sort().join(","),
+  ].join("|");
+
+  return `finding-${createHash("sha256").update(signature).digest("hex").slice(0, 12)}`;
+}
+
+function normalizeBoxForStableSignature(
+  box: BoundingBox,
+  canvasWidth: number,
+  canvasHeight: number,
+): [string, string, string, string] {
+  const safeWidth = Math.max(1, canvasWidth);
+  const safeHeight = Math.max(1, canvasHeight);
+
+  return [
+    (box.x / safeWidth).toFixed(4),
+    (box.y / safeHeight).toFixed(4),
+    (box.width / safeWidth).toFixed(4),
+    (box.height / safeHeight).toFixed(4),
+  ];
+}
+
+function primaryBoxForFinding(finding: Pick<DraftFinding, "bbox" | "element">): BoundingBox {
+  return finding.element?.bbox ?? finding.bbox;
+}
+
+function targetKeyForFinding(
+  finding: Pick<DraftFinding, "element"> | Pick<FindingReport, "element">,
+): string {
+  const selector = selectorHintForFinding(finding);
+
+  if (selector) {
+    return selector;
+  }
+
+  return fallbackTargetKeyForFinding(finding);
+}
+
+function selectorHintForFinding(
+  finding: Pick<DraftFinding, "element"> | Pick<FindingReport, "element">,
+): string | null {
+  return finding.element?.selector ?? null;
+}
+
+function fallbackTargetKeyForFinding(
+  finding: Pick<DraftFinding, "element"> | Pick<FindingReport, "element">,
+): string {
+  const tag = normalizeTargetFragment(finding.element?.tag ?? null);
+  const role = normalizeTargetFragment(finding.element?.role ?? null);
+  const textSnippet = normalizeTargetFragment(finding.element?.textSnippet ?? null);
+
+  if (tag === null && role === null && textSnippet === null) {
+    return "visual-cluster";
+  }
+
+  return [tag ?? "", role ?? "", textSnippet ?? ""].join("|");
+}
+
+function normalizeTargetFragment(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalized.length === 0 ? null : normalized;
+}
+
+function compareStableIdCollision(left: DraftFinding, right: DraftFinding): number {
+  const leftBox = primaryBoxForFinding(left);
+  const rightBox = primaryBoxForFinding(right);
+
+  for (const delta of [
+    leftBox.y - rightBox.y,
+    leftBox.x - rightBox.x,
+    leftBox.width - rightBox.width,
+    leftBox.height - rightBox.height,
+  ]) {
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+
+  if (left.mismatchPixels !== right.mismatchPixels) {
+    return right.mismatchPixels - left.mismatchPixels;
+  }
+
+  const fallbackTargetOrder = fallbackTargetKeyForFinding(left).localeCompare(
+    fallbackTargetKeyForFinding(right),
+  );
+
+  if (fallbackTargetOrder !== 0) {
+    return fallbackTargetOrder;
+  }
+
+  return compareDraftFindings(left, right);
 }
 
 function buildDomFindings(
@@ -152,45 +378,84 @@ function buildDomFindings(
     return [];
   }
 
-  const candidates = buildDomCandidates(domSnapshot, width, height);
-  const regionsByElement = new Map<string, ComparisonRegion[]>();
-  const elementsById = new Map(candidates.map((element) => [element.id, element]));
+  const anchorsById = new Map(
+    [domSnapshot.root, ...domSnapshot.elements].map((element) => [element.id, element]),
+  );
+  const groupsByAnchorId = new Map<
+    string,
+    {
+      anchor: DomSnapshotElement;
+      regions: ComparisonRegion[];
+      assignments: DomAssignmentResult[];
+    }
+  >();
+  const fallbackRegions: ComparisonRegion[] = [];
 
   for (const region of rawRegions) {
-    const element = resolveDomElementForRegion(region, candidates);
-    const existing = regionsByElement.get(element.id);
+    let assignment: DomAssignmentResult;
+
+    try {
+      assignment = resolveDomAssignmentForRegion(
+        region,
+        domSnapshot.bindingCandidates,
+        anchorsById,
+      );
+    } catch (error) {
+      if (isRecoverableDomAssignmentFailure(error)) {
+        fallbackRegions.push(region);
+        continue;
+      }
+
+      throw error;
+    }
+
+    const existing = groupsByAnchorId.get(assignment.anchor.id);
 
     if (existing) {
-      existing.push(region);
+      existing.regions.push(region);
+      existing.assignments.push(assignment);
     } else {
-      regionsByElement.set(element.id, [region]);
+      groupsByAnchorId.set(assignment.anchor.id, {
+        anchor: assignment.anchor,
+        regions: [region],
+        assignments: [assignment],
+      });
     }
   }
 
-  return Array.from(regionsByElement.entries(), ([elementId, regions]) => {
-    const element = elementsById.get(elementId);
+  const domFindingGroups = Array.from(
+    groupsByAnchorId.values(),
+    ({ anchor, regions, assignments }) => {
+      const representativeAssignment = selectRepresentativeDomAssignment(assignments);
 
-    if (!element) {
-      throw new AppError(`DOM element snapshot missing for finding group ${elementId}.`, {
-        exitCode: 3,
-        recommendation: "needs_human_review",
-        severity: "high",
-        code: "dom_snapshot_element_missing",
-      });
-    }
-
-    return {
-      finding: buildDraftFinding({
-        source: "dom-element",
+      return {
+        finding: buildDraftFinding({
+          source: "dom-element",
+          regions,
+          totalPixels,
+          element: anchor,
+          signalElement: representativeAssignment.candidate,
+          context: representativeAssignment.context,
+          canvasWidth: width,
+          canvasHeight: height,
+        }),
         regions,
-        totalPixels,
-        element,
-        canvasWidth: width,
-        canvasHeight: height,
-      }),
-      regions,
-    };
-  });
+      };
+    },
+  );
+
+  if (fallbackRegions.length === 0) {
+    return domFindingGroups;
+  }
+
+  return [
+    ...domFindingGroups,
+    ...buildVisualClusterFindings(fallbackRegions, totalPixels, width, height),
+  ];
+}
+
+function isRecoverableDomAssignmentFailure(error: unknown): boolean {
+  return error instanceof AppError && error.code === "dom_region_assignment_failed";
 }
 
 function buildVisualClusterFindings(
@@ -210,6 +475,8 @@ function buildVisualClusterFindings(
       regions: cluster,
       totalPixels,
       element: null,
+      signalElement: null,
+      context: null,
       canvasWidth: width,
       canvasHeight: height,
     }),
@@ -222,20 +489,46 @@ function buildDraftFinding(params: {
   regions: ComparisonRegion[];
   totalPixels: number;
   element: DomSnapshotElement | null;
+  signalElement: DomSnapshotElement | null;
+  context: DetailedFindingContext | null;
   canvasWidth: number;
   canvasHeight: number;
 }): DraftFinding {
   const bbox = unionRegionBoxes(params.regions);
   const mismatchPixels = params.regions.reduce((sum, region) => sum + region.pixelCount, 0);
   const kind = aggregateKind(params.regions);
-  const elementReport = params.element ? toElementReport(params.element) : null;
+  const elementReport = params.element ? toElementReport(params.element) : undefined;
   const primaryBox = elementReport?.bbox ?? bbox;
+  const signals = buildFindingSignals({
+    kind,
+    bbox,
+    element: params.signalElement,
+    canvasWidth: params.canvasWidth,
+    canvasHeight: params.canvasHeight,
+  });
+  const code = buildFindingCode(kind, signals);
+  const hotspots = buildHotspotBoxes(params.regions, primaryBox);
+  const issueTypes = issueTypesForKind(kind);
+  const findingWithoutRootCause: Pick<FindingReport, "code" | "signals" | "element"> = {
+    code,
+    signals,
+    ...(elementReport ? { element: elementReport } : {}),
+  };
 
   return {
+    rootCauseGroupId: rootCauseGroupIdForFinding(findingWithoutRootCause),
     source: params.source,
     kind,
+    code,
     severity: maxSeverity(params.regions.map((region) => region.severity)),
+    confidence: buildFindingConfidence({
+      source: params.source,
+      kind,
+      signals,
+      element: elementReport,
+    }),
     summary: buildFindingSummary(kind, elementReport?.tag ?? null),
+    fixHint: findingFixHintForCode(code),
     bbox,
     regionCount: params.regions.length,
     mismatchPixels,
@@ -243,106 +536,174 @@ function buildDraftFinding(params: {
       params.totalPixels === 0
         ? 0
         : Number(((mismatchPixels / params.totalPixels) * 100).toFixed(4)),
-    issueTypes: issueTypesForKind(kind),
-    signals: buildFindingSignals({
-      kind,
-      bbox,
-      element: params.element,
-      canvasWidth: params.canvasWidth,
-      canvasHeight: params.canvasHeight,
-    }),
-    hotspots: buildHotspotBoxes(params.regions, primaryBox),
-    element: elementReport,
+    issueTypes,
+    likelyAffectedProperties: findingAffectedPropertiesForCode(code),
+    signals,
+    hotspots,
+    ...(elementReport ? { element: elementReport } : {}),
+    ...(params.context ? { context: compactFindingContext(params.context) } : {}),
   };
 }
 
-function buildDomCandidates(
-  domSnapshot: DomSnapshot,
-  width: number,
-  height: number,
-): DomSnapshotElement[] {
-  const root: DomSnapshotElement = {
-    ...domSnapshot.root,
-    bbox: {
-      x: 0,
-      y: 0,
-      width,
-      height,
-    },
-  };
+function selectRepresentativeDomAssignment(
+  assignments: DomAssignmentResult[],
+): DomAssignmentResult {
+  return assignments.slice().sort((left, right) => {
+    if (left.assignmentConfidence !== right.assignmentConfidence) {
+      return right.assignmentConfidence - left.assignmentConfidence;
+    }
 
-  return [root, ...domSnapshot.elements];
+    if (left.region.pixelCount !== right.region.pixelCount) {
+      return right.region.pixelCount - left.region.pixelCount;
+    }
+
+    return left.anchor.selector.localeCompare(right.anchor.selector);
+  })[0];
 }
 
-function resolveDomElementForRegion(
+function resolveDomAssignmentForRegion(
   region: ComparisonRegion,
-  candidates: DomSnapshotElement[],
-): DomSnapshotElement {
+  candidates: DomBindingCandidate[],
+  anchorsById: Map<string, DomSnapshotElement>,
+): DomAssignmentResult {
   const centerX = region.x + region.width / 2;
   const centerY = region.y + region.height / 2;
-  const containing = candidates.filter((candidate) =>
-    containsPoint(candidate.bbox, centerX, centerY),
-  );
-
-  if (containing.length > 0) {
-    return containing.sort(compareDomCandidates)[0];
-  }
-
   const regionBox = {
     x: region.x,
     y: region.y,
     width: region.width,
     height: region.height,
   };
-  let bestCandidate: DomSnapshotElement | null = null;
-  let bestOverlap = 0;
+  const centerHitCandidates = candidates
+    .filter((candidate) => containsPoint(candidate.bbox, centerX, centerY))
+    .map((candidate) => ({
+      candidate,
+      overlapScore: overlapRatio(regionBox, candidate.bbox),
+    }));
+  const overlapCandidates =
+    centerHitCandidates.length > 0
+      ? centerHitCandidates
+      : candidates
+          .map((candidate) => ({
+            candidate,
+            overlapScore: overlapRatio(regionBox, candidate.bbox),
+          }))
+          .filter(({ overlapScore }) => overlapScore > 0);
+  const shortlist = overlapCandidates.slice().sort(compareBindingCandidates);
 
-  for (const candidate of candidates) {
-    const overlap = overlapRatio(regionBox, candidate.bbox);
-
-    if (overlap > bestOverlap) {
-      bestCandidate = candidate;
-      bestOverlap = overlap;
-      continue;
-    }
-
-    if (
-      overlap === bestOverlap &&
-      bestCandidate &&
-      compareDomCandidates(candidate, bestCandidate) < 0
-    ) {
-      bestCandidate = candidate;
-    }
+  if (shortlist.length === 0) {
+    throw new AppError(
+      `Could not assign mismatch region at (${region.x}, ${region.y}, ${region.width}x${region.height}) to a DOM element.`,
+      {
+        exitCode: 3,
+        recommendation: "needs_human_review",
+        severity: "high",
+        code: "dom_region_assignment_failed",
+      },
+    );
   }
 
-  if (bestCandidate && bestOverlap >= DEFAULT_DOM_OVERLAP_THRESHOLD) {
-    return bestCandidate;
+  const selected = shortlist[0];
+  const isCenterHit = centerHitCandidates.length > 0;
+
+  if (!isCenterHit && selected.overlapScore < WEAK_DOM_ASSIGNMENT_THRESHOLD) {
+    throw new AppError(
+      `Could not assign mismatch region at (${region.x}, ${region.y}, ${region.width}x${region.height}) to a DOM element.`,
+      {
+        exitCode: 3,
+        recommendation: "needs_human_review",
+        severity: "high",
+        code: "dom_region_assignment_failed",
+      },
+    );
   }
 
-  throw new AppError(
-    `Could not assign mismatch region at (${region.x}, ${region.y}, ${region.width}x${region.height}) to a DOM element.`,
-    {
-      exitCode: 3,
-      recommendation: "needs_human_review",
-      severity: "high",
-      code: "dom_region_assignment_failed",
-    },
+  const anchor = anchorsById.get(selected.candidate.anchorElementId);
+
+  if (!anchor) {
+    throw new AppError(
+      `DOM element snapshot missing for binding anchor ${selected.candidate.anchorElementId}.`,
+      {
+        exitCode: 3,
+        recommendation: "needs_human_review",
+        severity: "high",
+        code: "dom_snapshot_element_missing",
+      },
+    );
+  }
+
+  const maxDepth = Math.max(...shortlist.map(({ candidate }) => candidate.depth), 1);
+  const depthScore = Number((selected.candidate.depth / maxDepth).toFixed(4));
+  const overlapScore = Number(selected.overlapScore.toFixed(4));
+  const assignmentMethod =
+    isCenterHit && selected.candidate.anchorElementId === selected.candidate.id
+      ? "center-hit"
+      : isCenterHit
+        ? "ancestor-proxy"
+        : "overlap-best-fit";
+  const fallbackMarker =
+    selected.candidate.anchorElementId !== selected.candidate.id
+      ? "inline-proxy"
+      : !isCenterHit && overlapScore < DEFAULT_DOM_OVERLAP_THRESHOLD
+        ? "weak-overlap"
+        : !isCenterHit
+          ? "anchor-fallback"
+          : "none";
+  const baseConfidence =
+    assignmentMethod === "center-hit" ? 0.82 : assignmentMethod === "ancestor-proxy" ? 0.7 : 0.58;
+  const assignmentConfidence = roundConfidence(
+    baseConfidence + overlapScore * 0.15 + depthScore * 0.1 - (fallbackMarker !== "none" ? 0.1 : 0),
   );
+
+  return {
+    candidate: selected.candidate,
+    anchor,
+    context: {
+      binding: {
+        assignmentMethod,
+        assignmentConfidence,
+        candidateCount: shortlist.length,
+        overlapScore,
+        depthScore,
+        fallbackMarker,
+        selectedCandidate: selected.candidate.locator,
+        anchorElement: anchor.locator,
+      },
+      semantic: {
+        ancestry: anchor.ancestry,
+        identity: anchor.identity,
+        computedStyle: anchor.computedStyle,
+        textLayout: anchor.textLayout,
+        visibility: anchor.visibility,
+        interactivity: anchor.interactivity,
+        overlapHints: selected.candidate.overlapHints,
+      },
+    },
+    assignmentConfidence,
+    region,
+  };
 }
 
-function compareDomCandidates(left: DomSnapshotElement, right: DomSnapshotElement): number {
-  if (left.depth !== right.depth) {
-    return right.depth - left.depth;
+function compareBindingCandidates(
+  left: { candidate: DomBindingCandidate; overlapScore: number },
+  right: { candidate: DomBindingCandidate; overlapScore: number },
+): number {
+  if (left.candidate.depth !== right.candidate.depth) {
+    return right.candidate.depth - left.candidate.depth;
   }
 
-  const leftArea = left.bbox.width * left.bbox.height;
-  const rightArea = right.bbox.width * right.bbox.height;
+  const leftArea = left.candidate.bbox.width * left.candidate.bbox.height;
+  const rightArea = right.candidate.bbox.width * right.candidate.bbox.height;
 
   if (leftArea !== rightArea) {
     return leftArea - rightArea;
   }
 
-  return left.selector.localeCompare(right.selector);
+  if (left.overlapScore !== right.overlapScore) {
+    return right.overlapScore - left.overlapScore;
+  }
+
+  return left.candidate.selector.localeCompare(right.candidate.selector);
 }
 
 function clusterRegions(
@@ -508,16 +869,16 @@ function buildFindingSummary(kind: RegionKind, tag: string | null): string {
 
   switch (kind) {
     case "dimension":
-      return `${subject} is missing content, has extra content, or was captured at the wrong canvas size.`;
+      return `${subject} has missing, extra, or misframed content.`;
     case "layout":
-      return `${subject} differs in position, spacing, or alignment.`;
+      return `${subject} has layout drift.`;
     case "color":
-      return `${subject} differs in color or visual styling.`;
+      return `${subject} has style drift.`;
     case "mixed":
-      return `${subject} differs in both layout and styling.`;
+      return `${subject} has layout and style drift.`;
     case "pixel":
     default:
-      return `${subject} differs in rendering or fine-grained styling.`;
+      return `${subject} has rendering drift.`;
   }
 }
 
@@ -534,6 +895,139 @@ function issueTypesForKind(kind: RegionKind): IssueType[] {
     case "pixel":
     default:
       return ["style"];
+  }
+}
+
+function buildFindingCode(kind: RegionKind, signals: FindingSignalReport[]): FindingCode {
+  for (const signalCode of [
+    "probable_text_clipping",
+    "possible_capture_crop",
+    "possible_viewport_mismatch",
+  ] as const) {
+    if (!signals.some((signal) => signal.code === signalCode)) {
+      continue;
+    }
+
+    switch (signalCode) {
+      case "probable_text_clipping":
+        return "text_clipping";
+      case "possible_capture_crop":
+        return "capture_crop";
+      case "possible_viewport_mismatch":
+        return "viewport_mismatch";
+      default:
+        break;
+    }
+  }
+
+  switch (kind) {
+    case "dimension":
+      return "missing_or_extra_content";
+    case "mixed":
+      return "layout_style_mismatch";
+    case "layout":
+      return "layout_mismatch";
+    case "color":
+      return "style_mismatch";
+    case "pixel":
+    default:
+      return "rendering_mismatch";
+  }
+}
+
+function findingFixHintForCode(code: FindingCode): string {
+  switch (code) {
+    case "text_clipping":
+      return "Fix text overflow, line clamp, or available width.";
+    case "capture_crop":
+      return "Recapture with a broader selector scope or viewport.";
+    case "viewport_mismatch":
+      return "Verify viewport, selected frame, and capture target before retrying.";
+    case "missing_or_extra_content":
+      return "Verify the target content and frame, then fix missing or extra UI.";
+    case "layout_mismatch":
+      return "Fix positioning, spacing, or alignment.";
+    case "style_mismatch":
+      return "Fix colors, fills, borders, or shadows.";
+    case "layout_style_mismatch":
+      return "Fix both layout alignment and visual styles.";
+    case "rendering_mismatch":
+    default:
+      return "Tighten typography, radius, or shadow styling.";
+  }
+}
+
+function findingAffectedPropertiesForCode(code: FindingCode): AffectedPropertyCode[] {
+  switch (code) {
+    case "text_clipping":
+      return ["text.overflow", "text.lineClamp", "size.width"];
+    case "capture_crop":
+      return ["capture.selectorScope", "capture.viewport"];
+    case "viewport_mismatch":
+      return ["capture.viewport", "reference.frame"];
+    case "missing_or_extra_content":
+      return ["size.width", "size.height", "reference.frame"];
+    case "layout_mismatch":
+      return ["layout.position", "layout.spacing", "layout.alignment"];
+    case "style_mismatch":
+      return ["style.color", "style.background", "style.border"];
+    case "layout_style_mismatch":
+      return ["layout.position", "layout.spacing", "style.color", "style.background"];
+    case "rendering_mismatch":
+    default:
+      return ["style.typography", "style.shadow"];
+  }
+}
+
+function buildFindingConfidence(params: {
+  source: FindingSource;
+  kind: RegionKind;
+  signals: FindingSignalReport[];
+  element: Pick<FindingElementReport, "selector"> | undefined;
+}): number {
+  const baseline = baselineFindingConfidence(params.source, params.kind);
+  const signalScore = params.signals.reduce((maxScore, signal) => {
+    const score = signalConfidenceScore(signal.confidence);
+    return score > maxScore ? score : maxScore;
+  }, 0);
+  const selectorBonus = params.element?.selector ? 0.05 : 0;
+
+  return roundConfidence(Math.max(baseline, signalScore) + selectorBonus);
+}
+
+function baselineFindingConfidence(source: FindingSource, kind: RegionKind): number {
+  if (source === "dom-element") {
+    if (kind === "dimension") {
+      return 0.78;
+    }
+
+    if (kind === "pixel") {
+      return 0.64;
+    }
+
+    return 0.72;
+  }
+
+  if (kind === "dimension") {
+    return 0.72;
+  }
+
+  if (kind === "pixel") {
+    return 0.5;
+  }
+
+  return 0.58;
+}
+
+function signalConfidenceScore(confidence: FindingSignalReport["confidence"]): number {
+  switch (confidence) {
+    case "high":
+      return 0.9;
+    case "medium":
+      return 0.75;
+    case "low":
+    default:
+      return 0.55;
   }
 }
 
@@ -685,17 +1179,96 @@ function formatEdgeList(edges: CaptureEdge[]): string {
   return `${edges.slice(0, -1).join(", ")}, and ${edges[edges.length - 1]}`;
 }
 
-function toElementReport(element: DomSnapshotElement): FindingElementReport {
-  return {
+function toElementReport(element: DomSnapshotElement): DetailedFindingElementReport {
+  const report: DetailedFindingElementReport = {
     tag: element.tag,
     selector: element.selector,
-    role: element.role,
-    textSnippet: element.textSnippet,
     bbox: element.bbox,
+  };
+
+  if (element.role) {
+    report.role = element.role;
+  }
+
+  if (element.testId) {
+    report.testId = element.testId;
+  }
+
+  if (element.textSnippet) {
+    report.textSnippet = element.textSnippet;
+  }
+
+  return report;
+}
+
+function compactFindingContext(context: DetailedFindingContext): FindingContextReport {
+  const binding: FindingContextReport["binding"] = {
+    assignmentMethod: context.binding.assignmentMethod,
+    assignmentConfidence: context.binding.assignmentConfidence,
+  };
+
+  if (context.binding.fallbackMarker !== "none") {
+    binding.fallbackMarker = context.binding.fallbackMarker;
+  }
+
+  const semantic: NonNullable<FindingContextReport["semantic"]> = {};
+
+  semantic.computedStyle = context.semantic.computedStyle;
+
+  if (context.semantic.textLayout) {
+    semantic.textLayout = context.semantic.textLayout;
+  }
+
+  if (context.semantic.overlapHints.captureClippedEdges.length > 0) {
+    semantic.captureClippedEdges = context.semantic.overlapHints.captureClippedEdges;
+  }
+
+  return {
+    binding,
+    ...(Object.keys(semantic).length > 0 ? { semantic } : {}),
   };
 }
 
-function buildSeverityRollups(findings: DraftFinding[]): SeverityRollup[] {
+function toFindingReport(id: string, finding: DraftFinding): FindingReport {
+  return {
+    id,
+    rootCauseGroupId: finding.rootCauseGroupId,
+    source: finding.source,
+    kind: finding.kind,
+    code: finding.code,
+    severity: finding.severity,
+    confidence: finding.confidence,
+    summary: finding.summary,
+    fixHint: finding.fixHint,
+    bbox: finding.bbox,
+    regionCount: finding.regionCount,
+    mismatchPixels: finding.mismatchPixels,
+    mismatchPercentOfCanvas: finding.mismatchPercentOfCanvas,
+    issueTypes: finding.issueTypes,
+    likelyAffectedProperties: finding.likelyAffectedProperties,
+    signals: finding.signals,
+    ...(finding.element
+      ? {
+          element: {
+            tag: finding.element.tag,
+            selector: finding.element.selector,
+            ...(finding.element.role ? { role: finding.element.role } : {}),
+            ...(finding.element.testId ? { testId: finding.element.testId } : {}),
+            ...(finding.element.textSnippet ? { textSnippet: finding.element.textSnippet } : {}),
+          },
+        }
+      : {}),
+    ...(finding.context ? { context: finding.context } : {}),
+  };
+}
+
+function roundConfidence(value: number): number {
+  return Number(Math.min(0.99, Math.max(0.05, value)).toFixed(2));
+}
+
+function buildSeverityRollups(
+  findings: Array<Pick<DraftFinding, "severity">> | Array<Pick<FindingReport, "severity">>,
+): SeverityRollup[] {
   const severityCounts = new Map<Severity, number>();
 
   for (const finding of findings) {
@@ -707,7 +1280,9 @@ function buildSeverityRollups(findings: DraftFinding[]): SeverityRollup[] {
     .sort((left, right) => compareSeverityDescending(left.severity, right.severity));
 }
 
-function buildKindRollups(findings: DraftFinding[]): KindRollup[] {
+function buildKindRollups(
+  findings: Array<Pick<DraftFinding, "kind">> | Array<Pick<FindingReport, "kind">>,
+): KindRollup[] {
   const kindCounts = new Map<RegionKind, number>();
 
   for (const finding of findings) {
@@ -722,7 +1297,9 @@ function buildKindRollups(findings: DraftFinding[]): KindRollup[] {
     );
 }
 
-function buildTagRollups(findings: DraftFinding[]): TagRollup[] {
+function buildTagRollups(
+  findings: Array<Pick<DraftFinding, "element">> | Array<Pick<FindingReport, "element">>,
+): TagRollup[] {
   const tagCounts = new Map<string, number>();
 
   for (const finding of findings) {
@@ -746,7 +1323,73 @@ function buildTagRollups(findings: DraftFinding[]): TagRollup[] {
     });
 }
 
-function compareDraftFindings(left: DraftFinding, right: DraftFinding): number {
+function buildTopOmittedSelectors(findings: FindingReport[]): OmittedSelectorRollup[] {
+  const selectorRollups = new Map<string, OmittedSelectorRollup>();
+
+  for (const finding of findings) {
+    const selector = selectorHintForFinding(finding);
+
+    if (!selector) {
+      continue;
+    }
+
+    const existing = selectorRollups.get(selector);
+
+    if (existing) {
+      existing.count += 1;
+      existing.mismatchPixels += finding.mismatchPixels;
+      continue;
+    }
+
+    selectorRollups.set(selector, {
+      selector,
+      count: 1,
+      mismatchPixels: finding.mismatchPixels,
+    });
+  }
+
+  return Array.from(selectorRollups.values())
+    .sort((left, right) => {
+      if (left.count !== right.count) {
+        return right.count - left.count;
+      }
+
+      if (left.mismatchPixels !== right.mismatchPixels) {
+        return right.mismatchPixels - left.mismatchPixels;
+      }
+
+      return left.selector.localeCompare(right.selector);
+    })
+    .slice(0, 5);
+}
+
+function buildLargestOmittedRegions(findings: FindingReport[]): OmittedRegionRollup[] {
+  return findings
+    .slice()
+    .sort((left, right) => {
+      if (left.mismatchPixels !== right.mismatchPixels) {
+        return right.mismatchPixels - left.mismatchPixels;
+      }
+
+      return compareDraftFindings(left, right);
+    })
+    .slice(0, 5)
+    .map((finding) => ({
+      bbox: finding.bbox,
+      severity: finding.severity,
+      kind: finding.kind,
+      rootCauseGroupId: finding.rootCauseGroupId,
+      selector: selectorHintForFinding(finding),
+    }));
+}
+
+function compareDraftFindings(
+  left: Pick<DraftFinding, "severity" | "mismatchPixels" | "bbox" | "summary" | "rootCauseGroupId">,
+  right: Pick<
+    DraftFinding,
+    "severity" | "mismatchPixels" | "bbox" | "summary" | "rootCauseGroupId"
+  >,
+): number {
   const severityOrder = compareSeverityDescending(left.severity, right.severity);
 
   if (severityOrder !== 0) {
@@ -765,5 +1408,11 @@ function compareDraftFindings(left: DraftFinding, right: DraftFinding): number {
     return left.bbox.x - right.bbox.x;
   }
 
-  return left.summary.localeCompare(right.summary);
+  const summaryOrder = left.summary.localeCompare(right.summary);
+
+  if (summaryOrder !== 0) {
+    return summaryOrder;
+  }
+
+  return left.rootCauseGroupId.localeCompare(right.rootCauseGroupId);
 }

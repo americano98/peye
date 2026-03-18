@@ -93,7 +93,7 @@ describe("built CLI integration", () => {
       outputPath: previewPath,
       width: 100,
       height: 100,
-      body: `<rect x="20" y="10" width="30" height="30" fill="#0b84ff" />`,
+      body: `<rect x="15" y="10" width="30" height="30" fill="#0b84ff" />`,
     });
 
     const result = await runCli([
@@ -102,6 +102,8 @@ describe("built CLI integration", () => {
       previewPath,
       "--reference",
       referencePath,
+      "--mode",
+      "layout",
       "--output",
       outputPath,
     ]);
@@ -109,6 +111,9 @@ describe("built CLI integration", () => {
     expect(result.code).toBe(2);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("recommendation: retry_fix");
+    expect(result.stdout).toContain("decisionRule:");
+    expect(result.stdout).toContain("topAction:");
+    expect(result.stdout).toContain("requiresRecapture: false");
     expect(result.stdout).toContain(`output: ${outputPath}`);
   });
 
@@ -185,7 +190,7 @@ describe("built CLI integration", () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).not.toContain("recommendation:");
-    expect("reportVersion" in stdoutReport).toBe(false);
+    expect(result.stdout).not.toContain("decisionRule:");
     expect(stdoutReport.summary.recommendation).toBe("pass");
     expect(stdoutReport.error).toBeNull();
     expect(stdoutReport).toEqual(writtenReport);
@@ -341,6 +346,10 @@ describe("built CLI integration", () => {
       expect(stdoutReport.error?.code).toBe("preview_browser_missing");
       expect(stdoutReport.error?.message).toContain("peye install chromium");
       expect(stdoutReport.summary.reason).toContain("peye install chromium");
+      expect(stdoutReport.summary.topActions[0]?.code).toBe("fix_preview_setup");
+      expect(stdoutReport.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
+      expect(stdoutReport.summary.safeToAutofix).toBe(false);
+      expect(stdoutReport.summary.requiresRecapture).toBe(true);
     } finally {
       await server.close();
     }
@@ -380,6 +389,10 @@ describe("built CLI integration", () => {
       message: "--ignore-selector must not be empty.",
       exitCode: 1,
     });
+    expect(stdoutReport.summary.topActions[0]?.code).toBe("fix_preview_setup");
+    expect(stdoutReport.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
+    expect(stdoutReport.summary.safeToAutofix).toBe(false);
+    expect(stdoutReport.summary.requiresRecapture).toBe(true);
     expect(stdoutReport.inputs.preview.ignoreSelectors).toEqual([
       { selector: " ", matchedElementCount: null },
     ]);

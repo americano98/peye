@@ -119,9 +119,22 @@ function writeCliOutput(
 }
 
 function printSummary(report: Awaited<ReturnType<typeof runCompare>>["report"]): void {
+  const primaryTrace =
+    report.summary.decisionTrace.find((trace) => trace.axis !== "final") ??
+    report.summary.decisionTrace.at(-1) ??
+    null;
+  const topAction = report.summary.topActions[0] ?? null;
+
   console.log(`recommendation: ${report.summary.recommendation}`);
   console.log(`severity: ${report.summary.severity}`);
   console.log(`reason: ${report.summary.reason}`);
+  if (primaryTrace) {
+    console.log(`decisionRule: ${primaryTrace.axis}/${primaryTrace.code}`);
+  }
+  if (topAction) {
+    console.log(`topAction: ${topAction.code}`);
+  }
+  console.log(`requiresRecapture: ${report.summary.requiresRecapture}`);
   console.log(`mismatchPercent: ${report.metrics.mismatchPercent.toFixed(4)}%`);
   console.log(`findings: ${report.findings.length}/${report.metrics.findingsCount}`);
   console.log(`output: ${path.dirname(report.artifacts.report)}`);

@@ -2,6 +2,7 @@ import path from "node:path";
 import { DEFAULT_MODE } from "../config/defaults.js";
 import { buildFindingsAnalysis } from "../analysis/findings.js";
 import { decideRecommendation } from "../analysis/recommendation.js";
+import { buildSummaryReport, type FailureOrigin } from "../analysis/summary.js";
 import { materializePreviewImage } from "../capture/playwright-capture.js";
 import { runComparisonEngine } from "../compare/engine.js";
 import { createHeatmapArtifact } from "../compare/heatmap.js";
@@ -28,6 +29,7 @@ import type {
 import type {
   CompareCommandOptions,
   CompareReport,
+  ErrorReport,
   PreviewInputSourceReport,
   Recommendation,
   ReferenceInputSourceReport,
@@ -111,12 +113,20 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
         tolerated: options.thresholdTolerated,
         retry: options.thresholdRetry,
       },
+      findings: findingsAnalysis.fullFindings,
+    });
+    const summary = buildSummaryReport({
+      baseDecision: decision,
       findings: findingsAnalysis.findings,
+      fullFindings: findingsAnalysis.fullFindings,
+      analysisMode: preparedPreview.analysisMode,
+      omittedFindings: findingsAnalysis.rollups.omittedFindings,
+      error: null,
     });
 
     const report: CompareReport = {
       analysisMode: preparedPreview.analysisMode,
-      summary: decision,
+      summary,
       inputs: {
         preview: {
           input: previewInput.input,
@@ -159,14 +169,45 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
     };
   } catch (error) {
     if (isAppError(error)) {
+      const previewSource = toPreviewSourceReport(previewInput, options, preparedPreview);
+      const referenceSource = toReferenceSourceReport(
+        referenceInput,
+        options.reference,
+        preparedReference,
+      );
+      const failureAnalysisMode =
+        preparedPreview?.analysisMode ?? inferAnalysisMode(previewInput, options);
+      const errorReport: ErrorReport = {
+        code: error.code,
+        message: error.message,
+        exitCode: error.exitCode,
+      };
+      const summary = buildSummaryReport({
+        baseDecision: {
+          recommendation: error.recommendation ?? "needs_human_review",
+          severity: error.severity ?? (error.exitCode === 1 ? "medium" : "high"),
+          reason: error.message,
+          decisionTrace: [],
+        },
+        findings: [],
+        fullFindings: [],
+        analysisMode: failureAnalysisMode,
+        omittedFindings: 0,
+        error: errorReport,
+        failureOrigin: inferFailureOrigin({
+          errorCode: error.code,
+          previewInput,
+          referenceInput,
+          preparedPreview,
+          preparedReference,
+        }),
+      });
       const report = createFailureReport({
-        reason: error.message,
-        recommendation: error.recommendation ?? "needs_human_review",
-        severity: error.severity ?? (error.exitCode === 1 ? "medium" : "high"),
-        preview: toPreviewSourceReport(previewInput, options, preparedPreview),
-        reference: toReferenceSourceReport(referenceInput, options.reference, preparedReference),
+        summary,
+        preview: previewSource,
+        reference: referenceSource,
         viewport: previewInput?.viewport ?? null,
-        analysisMode: preparedPreview?.analysisMode ?? inferAnalysisMode(previewInput, options),
+        analysisMode: failureAnalysisMode,
         mode: options.mode,
         fullPage: options.fullPage,
         images: buildImagesReport(preparedPreview, preparedReference),
@@ -178,11 +219,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
           diff: null,
           heatmap: null,
         },
-        error: {
-          code: error.code,
-          message: error.message,
-          exitCode: error.exitCode,
-        },
+        error: errorReport,
       });
 
       await writeJsonFile(artifactPaths.report, report);
@@ -301,6 +338,54 @@ function toReferenceSourceReport(
     selector: null,
     transport: referenceInput.kind === "path" ? "path" : null,
   };
+}
+
+function inferFailureOrigin(params: {
+  errorCode: string;
+  previewInput: ParsedPreviewInput | null;
+  referenceInput: ParsedReferenceInput | null;
+  preparedPreview: PreparedPreviewImage | null;
+  preparedReference: PreparedReferenceImage | null;
+}): FailureOrigin {
+  if (
+    params.errorCode.startsWith("preview_") ||
+    params.errorCode.startsWith("playwright_") ||
+    params.errorCode.startsWith("dom_")
+  ) {
+    return "preview";
+  }
+
+  if (
+    params.errorCode.startsWith("reference_") ||
+    params.errorCode.startsWith("figma_") ||
+    params.errorCode === "remote_request_failed"
+  ) {
+    return "reference";
+  }
+
+  if (
+    params.errorCode.startsWith("input_file_") ||
+    params.errorCode.startsWith("image_") ||
+    params.errorCode === "artifact_write_failed"
+  ) {
+    if (!params.previewInput) {
+      return "preview";
+    }
+
+    if (!params.referenceInput) {
+      return "reference";
+    }
+
+    if (params.preparedPreview && !params.preparedReference) {
+      return "reference";
+    }
+
+    if (!params.preparedPreview) {
+      return "preview";
+    }
+  }
+
+  return "unknown";
 }
 
 function validateThresholdOrdering(options: CompareCommandOptions): void {

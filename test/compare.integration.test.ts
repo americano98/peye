@@ -111,12 +111,21 @@ describe("runCompare integration", () => {
         preview: previewPath,
         reference: referencePath,
         output: path.join(dir, "out"),
+        mode: "layout",
       }),
     );
 
-    expect("reportVersion" in result.report).toBe(false);
     expect(result.report.analysisMode).toBe("visual-clusters");
     expect(result.report.summary.recommendation).toBe("pass");
+    expect(result.report.summary.decisionTrace.map((trace) => trace.code)).toEqual([
+      "pixel_strict_pass",
+      "final_pass",
+    ]);
+    expect(result.report.summary.topActions).toEqual([]);
+    expect(result.report.summary.primaryBlockers).toEqual([]);
+    expect(result.report.summary.overallConfidence).toBe(0.85);
+    expect(result.report.summary.safeToAutofix).toBe(false);
+    expect(result.report.summary.requiresRecapture).toBe(false);
     expect(result.exitCode).toBe(0);
     expect(result.report.images).toEqual({
       preview: { width: 100, height: 100 },
@@ -166,8 +175,8 @@ describe("runCompare integration", () => {
     expect(result.report.metrics.mismatchPercent).toBeLessThanOrEqual(1.5);
     expect(result.report.findings).toHaveLength(1);
     expect(result.report.findings[0]?.source).toBe("visual-cluster");
-    expect(result.report.findings[0]?.element).toBeNull();
-    expect(Array.isArray(result.report.findings[0]?.hotspots)).toBe(true);
+    expect(result.report.findings[0]?.element).toBeUndefined();
+    expect(result.report.findings[0]?.context).toBeUndefined();
   });
 
   test("groups selector capture mismatches by DOM element", async () => {
@@ -222,7 +231,7 @@ describe("runCompare integration", () => {
             <body>
               <section id="hero">
                 <h1>Hero</h1>
-                <button id="cta">Buy</button>
+                <button id="cta" class="cta primary" data-testid="hero-cta">Buy</button>
               </section>
             </body>
           </html>
@@ -251,12 +260,32 @@ describe("runCompare integration", () => {
         "h1",
         "button",
       ]);
+      expect(result.report.findings.every((finding) => finding.code.length > 0)).toBe(true);
+      expect(
+        result.report.findings.every(
+          (finding) =>
+            !("actionTarget" in finding) &&
+            !("evidenceRefs" in finding) &&
+            !("hotspots" in finding),
+        ),
+      ).toBe(true);
       expect(result.report.rollups.byTag).toEqual([
         { tag: "button", count: 1 },
         { tag: "h1", count: 1 },
       ]);
-      expect(result.report.findings[0]?.element?.bbox.x).toBeLessThan(240);
-      expect(result.report.findings[0]?.element?.bbox.y).toBeLessThan(140);
+      const buttonFinding = result.report.findings.find(
+        (finding) => finding.element?.tag === "button",
+      );
+      expect(buttonFinding?.element?.testId).toBe("hero-cta");
+      expect(buttonFinding?.context?.binding.assignmentMethod).toBe("center-hit");
+      expect(buttonFinding?.context?.binding.fallbackMarker).toBeUndefined();
+      expect(buttonFinding?.context?.semantic?.computedStyle?.borderRadius).toBe("8px");
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "single-line",
+        }),
+      );
       expect(result.report.images).toEqual({
         preview: { width: 240, height: 140 },
         reference: { width: 240, height: 140 },
@@ -363,6 +392,10 @@ describe("runCompare integration", () => {
       expect(withoutIgnore.report.metrics.mismatchPercent).toBeGreaterThan(0);
       expect(withoutIgnore.report.metrics.structuralMismatchPercent).toBeGreaterThan(0);
       expect(withIgnore.report.summary.recommendation).toBe("pass");
+      expect(withIgnore.report.summary.decisionTrace.map((trace) => trace.code)).toEqual([
+        "pixel_strict_pass",
+        "final_pass",
+      ]);
       expect(withIgnore.report.findings).toEqual([]);
       expect(withIgnore.report.metrics.mismatchPercent).toBeLessThan(0.01);
       expect(withIgnore.report.metrics.structuralMismatchPercent).toBeLessThan(0.5);
@@ -499,7 +532,7 @@ describe("runCompare integration", () => {
             </head>
             <body>
               <section id="hero">
-                <button id="cta">Very long button label</button>
+                <button id="cta" data-testid="hero-cta">Very long button label</button>
               </section>
             </body>
           </html>
@@ -526,12 +559,60 @@ describe("runCompare integration", () => {
       );
 
       expect(buttonFinding).toBeDefined();
+      expect(result.report.summary.recommendation).toBe("retry_fix");
+      expect(
+        result.report.summary.decisionTrace.some(
+          (trace) => trace.code === "fixability_localized_actionable",
+        ),
+      ).toBe(true);
+      expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
+      expect(
+        result.report.summary.decisionTrace.some((trace) => trace.axis === "setup_capture_risk"),
+      ).toBe(false);
+      expect(buttonFinding?.code).toBe("text_clipping");
+      expect(buttonFinding?.fixHint).toContain("overflow");
+      expect(buttonFinding?.confidence).toBeGreaterThanOrEqual(0.8);
+      expect(buttonFinding?.likelyAffectedProperties).toEqual([
+        "text.overflow",
+        "text.lineClamp",
+        "size.width",
+      ]);
+      expect(buttonFinding?.element).toEqual({
+        selector: "section#hero > button#cta",
+        tag: "button",
+        testId: "hero-cta",
+        textSnippet: "Very long button label",
+      });
+      expect(buttonFinding?.element?.testId).toBe("hero-cta");
+      expect(buttonFinding?.context?.semantic?.computedStyle).toEqual(
+        expect.objectContaining({
+          fontSize: "16px",
+          lineHeight: "24px",
+          fontWeight: "400",
+        }),
+      );
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "overflowing",
+          hasEllipsis: true,
+          lineClamp: "none",
+          overflowsX: true,
+        }),
+      );
       expect(buttonFinding?.signals).toContainEqual({
         code: "probable_text_clipping",
         confidence: "medium",
         message:
           "Text content likely overflows the element bounds and is being clipped on the horizontal axis.",
       });
+      expect(buttonFinding?.context?.binding.assignmentConfidence).toBeGreaterThan(0.8);
+      expect(result.report.summary.topActions[0]?.code).toBe("fix_text_overflow");
+      expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe(
+        "text-wrap-regression",
+      );
+      expect(result.report.summary.safeToAutofix).toBe(true);
+      expect(result.report.summary.requiresRecapture).toBe(false);
     } finally {
       await server.close();
     }
@@ -601,12 +682,119 @@ describe("runCompare integration", () => {
       );
 
       expect(buttonFinding).toBeDefined();
+      expect(buttonFinding?.code).toBe("capture_crop");
+      expect(buttonFinding?.fixHint).toContain("Recapture");
+      expect(buttonFinding?.likelyAffectedProperties).toEqual([
+        "capture.selectorScope",
+        "capture.viewport",
+      ]);
+      expect(buttonFinding?.element?.selector).toBe("section#hero > button#cta");
+      expect(buttonFinding?.element?.textSnippet).toBe("Buy now");
       expect(buttonFinding?.signals).toContainEqual({
         code: "possible_capture_crop",
         confidence: "high",
         message:
           "Element bounds were clipped by the preview capture on the right edge(s); check selector scope and capture framing.",
       });
+      expect(buttonFinding?.context?.semantic?.captureClippedEdges).toEqual(["right"]);
+      expect(result.report.summary.topActions[0]?.code).toBe("run_sanity_check_same_target");
+      expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
+      expect(result.report.summary.safeToAutofix).toBe(false);
+      expect(result.report.summary.requiresRecapture).toBe(false);
+      expect(result.report.summary.requiresSanityCheck).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("falls back to a visual-cluster dimension finding when selector capture misses a thin edge strip", async () => {
+    const dir = await createTempDir("peye-selector-edge-strip");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 69,
+      body: `
+        <rect width="120" height="69" fill="#ffffff" />
+        <rect x="20" y="18" width="80" height="24" rx="4" fill="#0b84ff" />
+      `,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 120px; height: 60px; background: #ffffff; }
+                #hero button {
+                  position: absolute;
+                  left: 20px;
+                  top: 18px;
+                  width: 80px;
+                  height: 24px;
+                  border: 0;
+                  border-radius: 4px;
+                  background: #0b84ff;
+                  color: transparent;
+                  font-size: 0;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button id="cta">Buy</button>
+              </section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+
+      expect(result.report.analysisMode).toBe("dom-elements");
+      expect(result.report.error).toBeNull();
+      expect(result.exitCode).toBe(3);
+      expect(result.report.summary.recommendation).toBe("needs_human_review");
+      expect(result.report.summary.requiresRecapture).toBe(false);
+      expect(result.report.summary.requiresSanityCheck).toBe(true);
+      expect(result.report.findings).toHaveLength(1);
+      expect(result.report.findings[0]?.source).toBe("visual-cluster");
+      expect(result.report.findings[0]?.kind).toBe("dimension");
+      expect(result.report.findings[0]?.code).toBe("viewport_mismatch");
+      expect(result.report.findings[0]?.signals).toContainEqual({
+        code: "possible_viewport_mismatch",
+        confidence: "medium",
+        message:
+          "Dimension mismatch reaches the right, bottom, and left edge(s) of the comparison canvas; verify viewport, selected frame, and capture target.",
+      });
+      expect(result.report.summary.topActions[0]?.code).toBe("run_sanity_check_same_target");
+      expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
+      expect(result.report.images).toEqual({
+        preview: { width: 120, height: 60 },
+        reference: { width: 120, height: 69 },
+        canvas: { width: 120, height: 69 },
+      });
+      expect(result.report.artifacts.overlay).toContain("overlay.png");
+      expect(result.report.artifacts.diff).toContain("diff.png");
+      expect(result.report.artifacts.heatmap).toContain("heatmap.png");
     } finally {
       await server.close();
     }
@@ -661,6 +849,10 @@ describe("runCompare integration", () => {
       expect(report.error?.code).toBe("preview_selector_capture_failed");
       expect(report.error?.message).toContain("Preview selector could not be captured: #missing.");
       expect(report.error?.exitCode).toBe(3);
+      expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
+      expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
+      expect(report.summary.safeToAutofix).toBe(false);
+      expect(report.summary.requiresRecapture).toBe(true);
       expect(report.images).toEqual({
         preview: null,
         reference: null,
@@ -672,6 +864,241 @@ describe("runCompare integration", () => {
       expect(report.artifacts.overlay).toBeNull();
       expect(report.artifacts.diff).toBeNull();
       expect(report.artifacts.heatmap).toBeNull();
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("binds inline text mismatches through an ancestor proxy and exposes overlap hints", async () => {
+    const dir = await createTempDir("peye-inline-proxy");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 180,
+      height: 80,
+      body: `<rect x="20" y="20" width="140" height="36" rx="8" fill="#111111" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 180px; height: 80px; }
+                #hero button {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  width: 140px;
+                  height: 36px;
+                  border: 0;
+                  border-radius: 8px;
+                  background: #111111;
+                  color: #ffffff;
+                  font: 16px/36px monospace;
+                }
+                #hero .label {
+                  color: #ff6633;
+                }
+                #hero .overlay {
+                  position: absolute;
+                  left: 70px;
+                  top: 24px;
+                  width: 24px;
+                  height: 24px;
+                  background: rgba(0, 0, 0, 0);
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button id="cta" data-testid="hero-cta">
+                  <span class="label" data-testid="hero-label">Buy now</span>
+                </button>
+                <div class="overlay"></div>
+              </section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+      const buttonFinding = result.report.findings.find(
+        (finding) => finding.element?.tag === "button",
+      );
+
+      expect(buttonFinding).toBeDefined();
+      expect(buttonFinding?.element?.testId).toBe("hero-cta");
+      expect(buttonFinding?.context?.binding.assignmentMethod).toBe("ancestor-proxy");
+      expect(buttonFinding?.context?.binding.fallbackMarker).toBe("inline-proxy");
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "single-line",
+        }),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("preserves visible but non-interactive targets in semantic context", async () => {
+    const dir = await createTempDir("peye-non-interactive");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 140,
+      height: 60,
+      body: `<rect x="10" y="10" width="120" height="28" rx="4" fill="#111111" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 140px; height: 60px; }
+                #hero button {
+                  position: absolute;
+                  left: 10px;
+                  top: 10px;
+                  width: 120px;
+                  height: 28px;
+                  border: 0;
+                  border-radius: 4px;
+                  background: #ff6633;
+                  color: #ffffff;
+                  font: 14px/28px monospace;
+                  pointer-events: none;
+                  cursor: pointer;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button id="cta">Buy</button>
+              </section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+      const buttonFinding = result.report.findings.find(
+        (finding) => finding.element?.tag === "button",
+      );
+
+      expect(buttonFinding).toBeDefined();
+      expect(buttonFinding?.context?.semantic?.textLayout).toEqual(
+        expect.objectContaining({
+          lineCount: 1,
+          wrapState: "single-line",
+        }),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("falls back to selector root when no meaningful child anchor exists", async () => {
+    const dir = await createTempDir("peye-root-fallback");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 140,
+      height: 80,
+      body: `<rect x="0" y="0" width="140" height="80" fill="#0b84ff" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero {
+                  width: 140px;
+                  height: 80px;
+                  background: #ff6633;
+                }
+                #hero .label {
+                  display: inline-block;
+                  margin: 6px;
+                  color: #ffffff;
+                  font: 14px/18px monospace;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero"><span class="label">Hero</span></section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "240x160",
+        }),
+      );
+      const rootFinding = result.report.findings.find(
+        (finding) => finding.element?.selector === "section#hero",
+      );
+
+      expect(result.report.error).toBeNull();
+      expect(rootFinding).toBeDefined();
+      expect(rootFinding?.element?.tag).toBe("section");
+      expect(rootFinding?.context?.binding.assignmentMethod).toBe("center-hit");
+      expect(rootFinding?.element?.selector).toBe("section#hero");
     } finally {
       await server.close();
     }
@@ -732,7 +1159,7 @@ describe("runCompare integration", () => {
       outputPath: previewPath,
       width: 100,
       height: 100,
-      body: `<rect x="20" y="10" width="30" height="30" fill="#0b84ff" />`,
+      body: `<rect x="15" y="10" width="30" height="30" fill="#0b84ff" />`,
     });
 
     const result = await runCompare(
@@ -746,9 +1173,105 @@ describe("runCompare integration", () => {
     expect(result.report.summary.recommendation).toBe("retry_fix");
     expect(result.exitCode).toBe(2);
     expect(result.report.analysisMode).toBe("visual-clusters");
+    expect(
+      result.report.summary.decisionTrace.some(
+        (trace) => trace.axis === "layout" || trace.axis === "color",
+      ),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.axis === "setup_capture_risk"),
+    ).toBe(false);
     expect(result.report.findings.length).toBeGreaterThan(0);
-    expect(result.report.findings[0]?.element).toBeNull();
-    expect(Array.isArray(result.report.findings[0]?.hotspots)).toBe(true);
+    expect(result.report.findings[0]?.element).toBeUndefined();
+    expect(result.report.findings[0]?.context).toBeUndefined();
+  });
+
+  test("returns retry_fix for a localized color mismatch without setup-risk traces", async () => {
+    const dir = await createTempDir("peye-color-retry");
+    const previewPath = path.join(dir, "preview.png");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 100,
+      height: 100,
+      body: `<rect x="15" y="15" width="20" height="20" fill="#0b84ff" />`,
+    });
+
+    await createPngFromSvg({
+      outputPath: previewPath,
+      width: 100,
+      height: 100,
+      body: `<rect x="15" y="15" width="20" height="20" fill="#ff6633" />`,
+    });
+
+    const result = await runCompare(
+      await buildOptions({
+        preview: previewPath,
+        reference: referencePath,
+        output: path.join(dir, "out"),
+      }),
+    );
+
+    expect(result.report.summary.recommendation).toBe("retry_fix");
+    expect(result.exitCode).toBe(2);
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.code === "color_localized_drift"),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.axis === "setup_capture_risk"),
+    ).toBe(false);
+  });
+
+  test("returns retry_fix for global layout drift without recapture", async () => {
+    const dir = await createTempDir("peye-layout-global");
+    const previewPath = path.join(dir, "preview.png");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 200,
+      height: 180,
+      body: `
+        <rect x="20" y="20" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="50" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="80" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="110" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="140" width="160" height="8" fill="#0b84ff" />
+      `,
+    });
+
+    await createPngFromSvg({
+      outputPath: previewPath,
+      width: 200,
+      height: 180,
+      body: `
+        <rect x="20" y="38" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="68" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="98" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="128" width="160" height="8" fill="#0b84ff" />
+        <rect x="20" y="158" width="160" height="8" fill="#0b84ff" />
+      `,
+    });
+
+    const result = await runCompare(
+      await buildOptions({
+        preview: previewPath,
+        reference: referencePath,
+        output: path.join(dir, "out"),
+        mode: "layout",
+      }),
+    );
+
+    expect(result.report.summary.recommendation).toBe("retry_fix");
+    expect(result.exitCode).toBe(2);
+    expect(
+      result.report.summary.decisionTrace.some((trace) => trace.code === "layout_global_drift"),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
+    expect(result.report.summary.requiresRecapture).toBe(false);
   });
 
   test("returns a single dimension finding for large canvas mismatch", async () => {
@@ -781,7 +1304,20 @@ describe("runCompare integration", () => {
     expect(result.report.summary.recommendation).toBe("needs_human_review");
     expect(result.exitCode).toBe(3);
     expect(result.report.findings).toHaveLength(1);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_needs_human_review");
+    expect(result.report.summary.topActions[0]?.code).toBe("run_sanity_check_same_target");
+    expect(result.report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("viewport-crop-risk");
+    expect(result.report.summary.safeToAutofix).toBe(false);
+    expect(result.report.summary.requiresRecapture).toBe(false);
+    expect(result.report.summary.requiresSanityCheck).toBe(true);
     expect(result.report.findings[0]?.kind).toBe("dimension");
+    expect(result.report.findings[0]?.code).toBe("viewport_mismatch");
+    expect(result.report.findings[0]?.fixHint).toContain("Verify viewport");
+    expect(result.report.findings[0]?.likelyAffectedProperties).toEqual([
+      "capture.viewport",
+      "reference.frame",
+    ]);
+    expect(result.report.findings[0]?.element).toBeUndefined();
     expect(result.report.findings[0]?.issueTypes).toEqual(["missing_or_extra", "size"]);
     expect(result.report.findings[0]?.signals).toContainEqual({
       code: "possible_viewport_mismatch",
@@ -834,10 +1370,31 @@ describe("runCompare integration", () => {
     const reportBuffer = await readFile(result.report.artifacts.report);
 
     expect(result.report.analysisMode).toBe("visual-clusters");
+    expect(result.report.summary.recommendation).toBe("retry_fix");
+    expect(
+      result.report.summary.decisionTrace.some(
+        (trace) => trace.code === "fixability_diffuse_or_unaddressable",
+      ),
+    ).toBe(true);
+    expect(result.report.summary.decisionTrace.at(-1)?.code).toBe("final_retry_fix");
     expect(result.report.rollups.rawRegionCount).toBe(100);
     expect(result.report.metrics.findingsCount).toBe(100);
-    expect(result.report.findings).toHaveLength(25);
-    expect(result.report.rollups.omittedFindings).toBe(75);
+    expect(result.report.findings).toHaveLength(19);
+    expect(result.report.rollups.omittedFindings).toBe(81);
+    expect(result.report.rollups.omittedBySeverity).toEqual([{ severity: "medium", count: 81 }]);
+    expect(result.report.rollups.omittedByKind).toEqual([{ kind: "mixed", count: 81 }]);
+    expect(result.report.rollups.topOmittedSelectors).toEqual([]);
+    expect(result.report.rollups.largestOmittedRegions).toHaveLength(5);
+    expect(
+      result.report.rollups.largestOmittedRegions.every(
+        (region) => region.kind === result.report.rollups.omittedByKind[0]?.kind,
+      ),
+    ).toBe(true);
+    expect(
+      new Set(result.report.rollups.largestOmittedRegions.map((region) => region.rootCauseGroupId))
+        .size,
+    ).toBe(1);
+    expect(result.report.rollups.tailAreaPercent).toBeGreaterThan(1);
     expect(reportBuffer.byteLength).toBeLessThan(32_000);
   });
 
@@ -1000,6 +1557,10 @@ describe("runCompare integration", () => {
       expect(result.exitCode).toBe(3);
       expect(result.report.summary.recommendation).toBe("needs_human_review");
       expect(result.report.analysisMode).toBe("visual-clusters");
+      expect(report.summary.topActions[0]?.code).toBe("fix_reference_setup");
+      expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("reference-setup-error");
+      expect(report.summary.safeToAutofix).toBe(false);
+      expect(report.summary.requiresRecapture).toBe(true);
       expect(report.error).toEqual({
         code: "figma_image_missing",
         message: "Figma did not return an image URL for node 1:2.",
@@ -1408,6 +1969,10 @@ describe("runCompare integration", () => {
 
     expect(result.exitCode).toBe(1);
     expect(report.summary.recommendation).toBe("needs_human_review");
+    expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
+    expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
+    expect(report.summary.safeToAutofix).toBe(false);
+    expect(report.summary.requiresRecapture).toBe(true);
     expect(report.error).toEqual({
       code: "preview_viewport_required",
       message: "Preview URL requires --viewport so the browser screenshot is deterministic.",
@@ -1451,6 +2016,10 @@ describe("runCompare integration", () => {
     const report = await readReport(result.report.artifacts.report);
 
     expect(result.exitCode).toBe(1);
+    expect(report.summary.topActions[0]?.code).toBe("fix_preview_setup");
+    expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
+    expect(report.summary.safeToAutofix).toBe(false);
+    expect(report.summary.requiresRecapture).toBe(true);
     expect(report.error).toEqual({
       code: "preview_ignore_selector_empty",
       message: "--ignore-selector must not be empty.",

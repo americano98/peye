@@ -424,300 +424,28 @@ async function collectPageIgnoreSelections(
 }
 
 async function collectSelectorDomSnapshot(locator: Locator): Promise<DomSnapshot> {
-  return locator.evaluate(
-    (root, { maxSelectorLength, maxTextLength }) => {
-      const excludedTags = new Set(["script", "style", "noscript", "meta", "link", "head"]);
-      const inlineNoiseTags = new Set(["span", "strong", "em", "b", "i", "u", "small"]);
-      const semanticTags = new Set([
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "p",
-        "button",
-        "a",
-        "img",
-        "svg",
-        "video",
-        "canvas",
-        "input",
-        "textarea",
-        "select",
-        "label",
-        "li",
-        "section",
-        "article",
-        "nav",
-        "main",
-        "aside",
-        "header",
-        "footer",
-      ]);
-      const rootRect = root.getBoundingClientRect();
-      const captureBounds = {
-        x: 0,
-        y: 0,
-        width: Math.max(1, Math.round(rootRect.width)),
-        height: Math.max(1, Math.round(rootRect.height)),
-      };
-
-      const normalizeWhitespace = (value: string): string => value.replace(/\s+/g, " ").trim();
-      const clipValue = (value: string, limit: number): string =>
-        value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1))}\u2026`;
-      const toTag = (element: Element): string => element.tagName.toLowerCase();
-      const isTransparent = (value: string): boolean =>
-        value === "transparent" || value === "rgba(0, 0, 0, 0)" || value === "rgba(0,0,0,0)";
-      const hasVisibleBorder = (style: CSSStyleDeclaration): boolean =>
-        Number.parseFloat(style.borderTopWidth) > 0 ||
-        Number.parseFloat(style.borderRightWidth) > 0 ||
-        Number.parseFloat(style.borderBottomWidth) > 0 ||
-        Number.parseFloat(style.borderLeftWidth) > 0;
-      const hasPaintedBox = (style: CSSStyleDeclaration): boolean =>
-        style.backgroundImage !== "none" ||
-        !isTransparent(style.backgroundColor) ||
-        hasVisibleBorder(style) ||
-        style.boxShadow !== "none";
-      const escapeIdentifier = (value: string): string =>
-        typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(value) : value;
-      const directTextSnippet = (element: Element): string => {
-        const text =
-          element instanceof HTMLElement
-            ? element.innerText || element.textContent || ""
-            : element.textContent || "";
-        return clipValue(normalizeWhitespace(text), maxTextLength);
-      };
-      const depthFromRoot = (element: Element): number => {
-        let depth = 0;
-        let current: Element | null = element;
-
-        while (current && current !== root) {
-          depth += 1;
-          current = current.parentElement;
-        }
-
-        return depth;
-      };
-      const nthOfType = (element: Element): number => {
-        let index = 1;
-        let sibling = element.previousElementSibling;
-
-        while (sibling) {
-          if (sibling.tagName === element.tagName) {
-            index += 1;
-          }
-
-          sibling = sibling.previousElementSibling;
-        }
-
-        return index;
-      };
-      const segmentFor = (element: Element): string => {
-        const tag = toTag(element);
-
-        if (element.id) {
-          return `${tag}#${escapeIdentifier(element.id)}`;
-        }
-
-        const classNames = Array.from(element.classList)
-          .filter((className) => /^[A-Za-z_][\w-]*$/u.test(className))
-          .slice(0, 2);
-
-        if (classNames.length > 0) {
-          return `${tag}.${classNames.map((className) => escapeIdentifier(className)).join(".")}`;
-        }
-
-        return `${tag}:nth-of-type(${nthOfType(element)})`;
-      };
-      const buildSelector = (element: Element): string => {
-        if (element === root) {
-          return clipValue(segmentFor(element), maxSelectorLength);
-        }
-
-        const parts: string[] = [];
-        let current: Element | null = element;
-
-        while (current && parts.length < 3) {
-          parts.unshift(segmentFor(current));
-
-          if (current === root) {
-            break;
-          }
-
-          current = current.parentElement;
-        }
-
-        return clipValue(parts.join(" > "), maxSelectorLength);
-      };
-      const clipBoxToBounds = (
-        box: { x: number; y: number; width: number; height: number },
-        bounds: { x: number; y: number; width: number; height: number },
-      ) => {
-        const left = Math.max(bounds.x, box.x);
-        const top = Math.max(bounds.y, box.y);
-        const right = Math.min(bounds.x + bounds.width, box.x + box.width);
-        const bottom = Math.min(bounds.y + bounds.height, box.y + box.height);
-
-        if (right <= left || bottom <= top) {
-          return null;
-        }
-
-        return {
-          x: Math.round(left),
-          y: Math.round(top),
-          width: Math.round(right - left),
-          height: Math.round(bottom - top),
-        };
-      };
-      const clippedEdgesForBox = (
-        box: { x: number; y: number; width: number; height: number },
-        bounds: { x: number; y: number; width: number; height: number },
-      ): Array<"top" | "right" | "bottom" | "left"> => {
-        const edges: Array<"top" | "right" | "bottom" | "left"> = [];
-
-        if (box.y < bounds.y) {
-          edges.push("top");
-        }
-
-        if (box.x + box.width > bounds.x + bounds.width) {
-          edges.push("right");
-        }
-
-        if (box.y + box.height > bounds.y + bounds.height) {
-          edges.push("bottom");
-        }
-
-        if (box.x < bounds.x) {
-          edges.push("left");
-        }
-
-        return edges;
-      };
-      const toRelativeBox = (element: Element) => {
-        const rect = element.getBoundingClientRect();
-        const rawBox = {
-          x: rect.left - rootRect.left,
-          y: rect.top - rootRect.top,
-          width: rect.width,
-          height: rect.height,
-        };
-        const bbox = clipBoxToBounds(rawBox, captureBounds);
-
-        if (!bbox) {
-          return null;
-        }
-
-        return {
-          bbox,
-          captureClippedEdges: clippedEdgesForBox(rawBox, captureBounds),
-        };
-      };
-      const isVisible = (element: Element): boolean => {
-        const rect = element.getBoundingClientRect();
-
-        if (rect.width <= 0 || rect.height <= 0) {
-          return false;
-        }
-
-        const style = window.getComputedStyle(element);
-        return (
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          style.opacity !== "0" &&
-          style.pointerEvents !== "none"
-        );
-      };
-      const isMeaningful = (element: Element): boolean => {
-        if (element === root) {
-          return true;
-        }
-
-        const tag = toTag(element);
-
-        if (excludedTags.has(tag) || inlineNoiseTags.has(tag)) {
-          return false;
-        }
-
-        if (!isVisible(element)) {
-          return false;
-        }
-
-        const style = window.getComputedStyle(element);
-        const hasText = directTextSnippet(element).length > 0;
-        const hasRole = Boolean(element.getAttribute("role"));
-
-        return (
-          hasText ||
-          hasRole ||
-          semanticTags.has(tag) ||
-          hasPaintedBox(style) ||
-          element.children.length === 0
-        );
-      };
-      const buildSnapshotElement = (element: Element) => {
-        const boxInfo = toRelativeBox(element);
-
-        if (!boxInfo) {
-          return null;
-        }
-
-        const style = window.getComputedStyle(element);
-        const textMetrics =
-          element instanceof HTMLElement
-            ? {
-                clientWidth: Math.round(element.clientWidth),
-                clientHeight: Math.round(element.clientHeight),
-                scrollWidth: Math.round(element.scrollWidth),
-                scrollHeight: Math.round(element.scrollHeight),
-                overflowX: style.overflowX,
-                overflowY: style.overflowY,
-                textOverflow: style.textOverflow,
-                whiteSpace: style.whiteSpace,
-                lineClamp:
-                  style.getPropertyValue("-webkit-line-clamp") ||
-                  style.getPropertyValue("line-clamp") ||
-                  null,
-              }
-            : null;
-
-        return {
-          id: buildSelector(element),
-          tag: toTag(element),
-          selector: buildSelector(element),
-          role: element.getAttribute("role"),
-          textSnippet: directTextSnippet(element) || null,
-          bbox: boxInfo.bbox,
-          depth: depthFromRoot(element),
-          captureClippedEdges: boxInfo.captureClippedEdges,
-          textMetrics,
-        };
-      };
-      const allElements = [root, ...Array.from(root.querySelectorAll("*"))]
-        .filter((element) => isMeaningful(element))
-        .map((element) => buildSnapshotElement(element))
-        .filter((element): element is NonNullable<typeof element> => element !== null);
-      const [snapshotRoot, ...elements] = allElements;
-
-      if (!snapshotRoot) {
-        throw new Error("No meaningful DOM elements were found inside the selector capture.");
-      }
-
-      return {
-        root: snapshotRoot,
-        elements,
-      };
-    },
-    {
-      maxSelectorLength: DEFAULT_MAX_SELECTOR_LENGTH,
-      maxTextLength: DEFAULT_MAX_TEXT_SNIPPET_LENGTH,
-    },
-  );
+  return collectDomSnapshotForLocator(locator, {
+    captureMode: "selector",
+    fullPageCapture: false,
+  });
 }
 
 async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<DomSnapshot> {
-  return page.evaluate(
-    ({ fullPageCapture, maxSelectorLength, maxTextLength }) => {
+  return collectDomSnapshotForLocator(page.locator("body").first(), {
+    captureMode: "page",
+    fullPageCapture: fullPage,
+  });
+}
+
+async function collectDomSnapshotForLocator(
+  locator: Locator,
+  params: {
+    captureMode: "selector" | "page";
+    fullPageCapture: boolean;
+  },
+): Promise<DomSnapshot> {
+  return locator.evaluate(
+    (root, { captureMode, fullPageCapture, maxSelectorLength, maxTextLength }): DomSnapshot => {
       const excludedTags = new Set(["script", "style", "noscript", "meta", "link", "head"]);
       const inlineNoiseTags = new Set(["span", "strong", "em", "b", "i", "u", "small"]);
       const semanticTags = new Set([
@@ -747,35 +475,81 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
         "header",
         "footer",
       ]);
-      const root = document.body ?? document.documentElement;
-      const captureBounds = fullPageCapture
-        ? {
-            x: 0,
-            y: 0,
-            width: Math.max(
-              document.documentElement.scrollWidth,
-              document.body?.scrollWidth ?? 0,
-              window.innerWidth,
-            ),
-            height: Math.max(
-              document.documentElement.scrollHeight,
-              document.body?.scrollHeight ?? 0,
-              window.innerHeight,
-            ),
-          }
-        : {
-            x: 0,
-            y: 0,
-            width: window.innerWidth,
-            height: window.innerHeight,
-          };
+      const interactiveTags = new Set([
+        "button",
+        "a",
+        "input",
+        "textarea",
+        "select",
+        "option",
+        "summary",
+      ]);
+      const interactiveRoles = new Set([
+        "button",
+        "link",
+        "tab",
+        "checkbox",
+        "radio",
+        "switch",
+        "menuitem",
+        "option",
+        "textbox",
+      ]);
+      const rootRect = root.getBoundingClientRect();
+      const captureBounds =
+        captureMode === "page"
+          ? fullPageCapture
+            ? {
+                x: 0,
+                y: 0,
+                width: Math.max(
+                  document.documentElement.scrollWidth,
+                  document.body?.scrollWidth ?? 0,
+                  window.innerWidth,
+                ),
+                height: Math.max(
+                  document.documentElement.scrollHeight,
+                  document.body?.scrollHeight ?? 0,
+                  window.innerHeight,
+                ),
+              }
+            : {
+                x: 0,
+                y: 0,
+                width: window.innerWidth,
+                height: window.innerHeight,
+              }
+          : {
+              x: 0,
+              y: 0,
+              width: Math.max(1, Math.round(rootRect.width)),
+              height: Math.max(1, Math.round(rootRect.height)),
+            };
 
       const normalizeWhitespace = (value: string): string => value.replace(/\s+/g, " ").trim();
       const clipValue = (value: string, limit: number): string =>
         value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1))}\u2026`;
       const toTag = (element: Element): string => element.tagName.toLowerCase();
+      const escapeIdentifier = (value: string): string =>
+        typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(value) : value;
       const isTransparent = (value: string): boolean =>
         value === "transparent" || value === "rgba(0, 0, 0, 0)" || value === "rgba(0,0,0,0)";
+      const extractTestId = (element: Element): string | null =>
+        element.getAttribute("data-testid") ||
+        element.getAttribute("data-test") ||
+        element.getAttribute("data-qa") ||
+        null;
+      const classSummaryFor = (element: Element): string[] =>
+        Array.from(element.classList)
+          .filter((className) => /^[A-Za-z_][\w-]*$/u.test(className))
+          .slice(0, 3);
+      const directTextSnippet = (element: Element): string => {
+        const text =
+          element instanceof HTMLElement
+            ? element.innerText || element.textContent || ""
+            : element.textContent || "";
+        return clipValue(normalizeWhitespace(text), maxTextLength);
+      };
       const hasVisibleBorder = (style: CSSStyleDeclaration): boolean =>
         Number.parseFloat(style.borderTopWidth) > 0 ||
         Number.parseFloat(style.borderRightWidth) > 0 ||
@@ -786,26 +560,6 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
         !isTransparent(style.backgroundColor) ||
         hasVisibleBorder(style) ||
         style.boxShadow !== "none";
-      const escapeIdentifier = (value: string): string =>
-        typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(value) : value;
-      const directTextSnippet = (element: Element): string => {
-        const text =
-          element instanceof HTMLElement
-            ? element.innerText || element.textContent || ""
-            : element.textContent || "";
-        return clipValue(normalizeWhitespace(text), maxTextLength);
-      };
-      const depthFromRoot = (element: Element): number => {
-        let depth = 0;
-        let current: Element | null = element;
-
-        while (current && current !== root) {
-          depth += 1;
-          current = current.parentElement;
-        }
-
-        return depth;
-      };
       const nthOfType = (element: Element): number => {
         let index = 1;
         let sibling = element.previousElementSibling;
@@ -827,12 +581,10 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
           return `${tag}#${escapeIdentifier(element.id)}`;
         }
 
-        const classNames = Array.from(element.classList)
-          .filter((className) => /^[A-Za-z_][\w-]*$/u.test(className))
-          .slice(0, 2);
+        const classSummary = classSummaryFor(element);
 
-        if (classNames.length > 0) {
-          return `${tag}.${classNames.map((className) => escapeIdentifier(className)).join(".")}`;
+        if (classSummary.length > 0) {
+          return `${tag}.${classSummary.map((className) => escapeIdentifier(className)).join(".")}`;
         }
 
         return `${tag}:nth-of-type(${nthOfType(element)})`;
@@ -901,16 +653,27 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
 
         return edges;
       };
-      const toRelativeBox = (element: Element) => {
+      const buildRawBox = (element: Element) => {
         const rect = element.getBoundingClientRect();
-        const x = fullPageCapture ? rect.left + window.scrollX : rect.left;
-        const y = fullPageCapture ? rect.top + window.scrollY : rect.top;
-        const rawBox = {
-          x,
-          y,
+
+        if (captureMode === "selector") {
+          return {
+            x: rect.left - rootRect.left,
+            y: rect.top - rootRect.top,
+            width: rect.width,
+            height: rect.height,
+          };
+        }
+
+        return {
+          x: fullPageCapture ? rect.left + window.scrollX : rect.left,
+          y: fullPageCapture ? rect.top + window.scrollY : rect.top,
           width: rect.width,
           height: rect.height,
         };
+      };
+      const toRelativeBox = (element: Element) => {
+        const rawBox = buildRawBox(element);
         const bbox = clipBoxToBounds(rawBox, captureBounds);
 
         if (!bbox) {
@@ -922,7 +685,41 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
           captureClippedEdges: clippedEdgesForBox(rawBox, captureBounds),
         };
       };
-      const isVisible = (element: Element): boolean => {
+      const depthFromRoot = (element: Element): number => {
+        let depth = 0;
+        let current: Element | null = element;
+
+        while (current && current !== root) {
+          depth += 1;
+          current = current.parentElement;
+        }
+
+        return depth;
+      };
+      const buildLocator = (element: Element) => ({
+        tag: toTag(element),
+        selector: buildSelector(element),
+        role: element.getAttribute("role"),
+        testId: extractTestId(element),
+        domId: element.id || null,
+        classSummary: classSummaryFor(element),
+      });
+      const buildAncestry = (element: Element) => {
+        const ancestry: Array<ReturnType<typeof buildLocator>> = [];
+        let current = element.parentElement;
+
+        while (current && current !== root && ancestry.length < 4) {
+          ancestry.push(buildLocator(current));
+          current = current.parentElement;
+        }
+
+        if (current === root && ancestry.length < 4) {
+          ancestry.push(buildLocator(root));
+        }
+
+        return ancestry;
+      };
+      const isVisibleForSnapshot = (element: Element): boolean => {
         const rect = element.getBoundingClientRect();
 
         if (rect.width <= 0 || rect.height <= 0) {
@@ -933,22 +730,17 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
         return (
           style.display !== "none" &&
           style.visibility !== "hidden" &&
-          style.opacity !== "0" &&
-          style.pointerEvents !== "none"
+          Number.parseFloat(style.opacity || "1") > 0
         );
       };
-      const isMeaningful = (element: Element): boolean => {
-        if (element === root) {
-          return true;
+      const isMeaningfulAnchor = (element: Element): boolean => {
+        if (element === root || !isVisibleForSnapshot(element)) {
+          return false;
         }
 
         const tag = toTag(element);
 
         if (excludedTags.has(tag) || inlineNoiseTags.has(tag)) {
-          return false;
-        }
-
-        if (!isVisible(element)) {
           return false;
         }
 
@@ -964,7 +756,112 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
           element.children.length === 0
         );
       };
-      const buildSnapshotElement = (element: Element) => {
+      const hasTextLayoutEvidence = (element: Element): boolean =>
+        element instanceof HTMLElement &&
+        (element.scrollWidth > element.clientWidth + 1 ||
+          element.scrollHeight > element.clientHeight + 1);
+      const findNearestAnchor = (element: Element, anchors: Set<Element>): Element | null => {
+        let current: Element | null = element;
+
+        while (current) {
+          if (anchors.has(current)) {
+            return current;
+          }
+
+          if (current === root) {
+            break;
+          }
+
+          current = current.parentElement;
+        }
+
+        return null;
+      };
+      const computeLineCount = (element: Element, hasText: boolean): number => {
+        if (!hasText) {
+          return 0;
+        }
+
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          const positions: number[] = [];
+
+          for (const rect of Array.from(range.getClientRects())) {
+            if (rect.width <= 0 || rect.height <= 0) {
+              continue;
+            }
+
+            const position = Math.round((rect.top + rect.bottom) / 2);
+
+            if (!positions.some((value) => Math.abs(value - position) <= 1)) {
+              positions.push(position);
+            }
+          }
+
+          return positions.length > 0 ? positions.length : 1;
+        } catch {
+          return 1;
+        }
+      };
+      const semanticTagForElement = (element: Element): string | null => {
+        let current: Element | null = element;
+
+        while (current) {
+          const tag = toTag(current);
+
+          if (semanticTags.has(tag)) {
+            return tag;
+          }
+
+          if (current === root) {
+            break;
+          }
+
+          current = current.parentElement;
+        }
+
+        return null;
+      };
+      const buildOverlapHints = (
+        element: Element,
+        captureClippedEdges: Array<"top" | "right" | "bottom" | "left">,
+      ) => {
+        const rect = element.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+
+        if (
+          centerX < 0 ||
+          centerY < 0 ||
+          centerX > window.innerWidth ||
+          centerY > window.innerHeight
+        ) {
+          return {
+            topMostAtCenter: null,
+            stackDepthAtCenter: 0,
+            occludingSelector: null,
+            captureClippedEdges,
+          };
+        }
+
+        const stack = Array.from(document.elementsFromPoint(centerX, centerY));
+        const topMostAtCenter = stack[0] ? buildSelector(stack[0]) : null;
+        const occludingElement =
+          stack.find((candidate) => candidate !== element && !element.contains(candidate)) ?? null;
+
+        return {
+          topMostAtCenter,
+          stackDepthAtCenter: stack.length,
+          occludingSelector: occludingElement ? buildSelector(occludingElement) : null,
+          captureClippedEdges,
+        };
+      };
+      const buildSnapshotElement = (
+        element: Element,
+        candidateKind: "anchor" | "inline-descendant" | "leaf-proxy",
+        anchorElementId: string,
+      ) => {
         const boxInfo = toRelativeBox(element);
 
         if (!boxInfo) {
@@ -972,6 +869,8 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
         }
 
         const style = window.getComputedStyle(element);
+        const textSnippet = directTextSnippet(element);
+        const hasText = textSnippet.length > 0;
         const textMetrics =
           element instanceof HTMLElement
             ? {
@@ -989,36 +888,212 @@ async function collectPageDomSnapshot(page: Page, fullPage: boolean): Promise<Do
                   null,
               }
             : null;
+        const overflowsX = Boolean(
+          textMetrics && textMetrics.scrollWidth > textMetrics.clientWidth + 1,
+        );
+        const overflowsY = Boolean(
+          textMetrics && textMetrics.scrollHeight > textMetrics.clientHeight + 1,
+        );
+        const lineClamp = textMetrics?.lineClamp ?? null;
+        const lineClampActive =
+          lineClamp !== null &&
+          lineClamp !== "" &&
+          lineClamp !== "none" &&
+          lineClamp !== "0" &&
+          lineClamp !== "normal";
+        const lineCount = computeLineCount(element, hasText);
+        const wrapState: "clamped" | "overflowing" | "wrapped" | "single-line" | "unknown" =
+          !hasText
+            ? "unknown"
+            : lineClampActive
+              ? "clamped"
+              : overflowsX || overflowsY
+                ? "overflowing"
+                : lineCount > 1 && style.whiteSpace !== "nowrap" && style.whiteSpace !== "pre"
+                  ? "wrapped"
+                  : lineCount <= 1
+                    ? "single-line"
+                    : "unknown";
+        const disabled =
+          element instanceof HTMLButtonElement ||
+          element instanceof HTMLInputElement ||
+          element instanceof HTMLSelectElement ||
+          element instanceof HTMLTextAreaElement ||
+          element instanceof HTMLOptionElement
+            ? element.disabled
+            : null;
+        const tabIndex = element instanceof HTMLElement ? element.tabIndex : null;
+        const role = element.getAttribute("role");
+        const tag = toTag(element);
 
         return {
           id: buildSelector(element),
-          tag: toTag(element),
+          tag,
           selector: buildSelector(element),
-          role: element.getAttribute("role"),
-          textSnippet: directTextSnippet(element) || null,
+          role,
+          testId: extractTestId(element),
+          domId: element.id || null,
+          classSummary: classSummaryFor(element),
+          textSnippet: textSnippet || null,
           bbox: boxInfo.bbox,
           depth: depthFromRoot(element),
           captureClippedEdges: boxInfo.captureClippedEdges,
           textMetrics,
+          ancestry: buildAncestry(element),
+          locator: buildLocator(element),
+          identity: {
+            domId: element.id || null,
+            classSummary: classSummaryFor(element),
+            testId: extractTestId(element),
+            semanticTag: semanticTagForElement(element),
+            candidateKind,
+          },
+          computedStyle: {
+            fontSize: style.fontSize,
+            lineHeight: style.lineHeight,
+            fontWeight: style.fontWeight,
+            color: style.color,
+            backgroundColor: style.backgroundColor,
+            borderRadius: style.borderRadius,
+            gap: style.gap,
+            padding: style.padding,
+            width: style.width,
+            height: style.height,
+            margin: style.margin,
+          },
+          textLayout: !hasText
+            ? null
+            : {
+                lineCount,
+                wrapState,
+                hasEllipsis: style.textOverflow === "ellipsis",
+                lineClamp,
+                overflowsX,
+                overflowsY,
+              },
+          visibility: {
+            isVisible: isVisibleForSnapshot(element),
+            display: style.display,
+            visibility: style.visibility,
+            opacity: Number.parseFloat(style.opacity || "1"),
+            pointerEvents: style.pointerEvents,
+            ariaHidden:
+              element.getAttribute("aria-hidden") === null
+                ? null
+                : element.getAttribute("aria-hidden") === "true",
+          },
+          interactivity: {
+            isInteractive:
+              (interactiveTags.has(tag) ||
+                (role !== null && interactiveRoles.has(role)) ||
+                (tabIndex !== null && tabIndex >= 0) ||
+                style.cursor === "pointer" ||
+                element.hasAttribute("contenteditable")) &&
+              disabled !== true &&
+              style.pointerEvents !== "none",
+            disabled,
+            tabIndex,
+            cursor: style.cursor,
+          },
+          overlapHints: buildOverlapHints(element, boxInfo.captureClippedEdges),
+          candidateKind,
+          anchorElementId,
         };
       };
-      const allElements = [root, ...Array.from(root.querySelectorAll("*"))]
-        .filter((element) => isMeaningful(element))
-        .map((element) => buildSnapshotElement(element))
-        .filter((element): element is NonNullable<typeof element> => element !== null);
-      const [snapshotRoot, ...elements] = allElements;
+      const visibleElements = [root, ...Array.from(root.querySelectorAll("*"))].filter(
+        (element) => {
+          if (element === root) {
+            return true;
+          }
 
-      if (!snapshotRoot) {
-        throw new Error("No meaningful DOM elements were found in the page capture.");
+          const tag = toTag(element);
+          return !excludedTags.has(tag) && isVisibleForSnapshot(element);
+        },
+      );
+      const anchorElements = visibleElements.filter((element) => isMeaningfulAnchor(element));
+      const anchorSet = new Set<Element>([root, ...anchorElements]);
+      const bindingCandidateElements = visibleElements.filter((element) => {
+        if (element === root) {
+          return true;
+        }
+
+        if (anchorSet.has(element)) {
+          return true;
+        }
+
+        const tag = toTag(element);
+        const testId = extractTestId(element);
+        const hasText = directTextSnippet(element).length > 0;
+        const hasRole = Boolean(element.getAttribute("role"));
+
+        if (inlineNoiseTags.has(tag)) {
+          return (
+            (hasText || hasRole || Boolean(testId)) &&
+            findNearestAnchor(element, anchorSet) !== null
+          );
+        }
+
+        if (testId) {
+          return findNearestAnchor(element, anchorSet) !== null;
+        }
+
+        return (
+          element.children.length === 0 &&
+          (hasText || hasRole || hasTextLayoutEvidence(element)) &&
+          findNearestAnchor(element, anchorSet) !== null
+        );
+      });
+      const rootSnapshot = buildSnapshotElement(root, "anchor", buildSelector(root));
+      const elementSnapshots = anchorElements
+        .map((element) => buildSnapshotElement(element, "anchor", buildSelector(element)))
+        .filter((element): element is NonNullable<typeof element> => element !== null);
+      const bindingCandidates = bindingCandidateElements
+        .map((element) => {
+          const anchorElement = anchorSet.has(element)
+            ? element
+            : findNearestAnchor(element, anchorSet);
+
+          if (!anchorElement) {
+            return null;
+          }
+
+          return buildSnapshotElement(
+            element,
+            anchorSet.has(element)
+              ? "anchor"
+              : inlineNoiseTags.has(toTag(element))
+                ? "inline-descendant"
+                : "leaf-proxy",
+            buildSelector(anchorElement),
+          );
+        })
+        .filter((element): element is NonNullable<typeof element> => element !== null);
+
+      if (!rootSnapshot) {
+        throw new Error(
+          captureMode === "selector"
+            ? "No DOM context could be collected inside the selector capture."
+            : "No DOM context could be collected for the page capture.",
+        );
+      }
+
+      if (elementSnapshots.length === 0 && bindingCandidates.length === 0) {
+        throw new Error(
+          captureMode === "selector"
+            ? "No meaningful DOM elements were found inside the selector capture."
+            : "No meaningful DOM elements were found in the page capture.",
+        );
       }
 
       return {
-        root: snapshotRoot,
-        elements,
+        root: rootSnapshot,
+        elements: elementSnapshots,
+        bindingCandidates,
       };
     },
     {
-      fullPageCapture: fullPage,
+      captureMode: params.captureMode,
+      fullPageCapture: params.fullPageCapture,
       maxSelectorLength: DEFAULT_MAX_SELECTOR_LENGTH,
       maxTextLength: DEFAULT_MAX_TEXT_SNIPPET_LENGTH,
     },

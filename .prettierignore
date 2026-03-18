@@ -1,7 +1,0 @@
-dist
-node_modules
-coverage
-playwright-report
-peye-output
-test-output
-*.tgz
