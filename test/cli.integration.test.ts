@@ -30,16 +30,24 @@ async function ensureBuiltCli(): Promise<void> {
   await buildPromise;
 }
 
-async function runCli(args: string[]): Promise<CliRunResult> {
+async function runCli(args: string[], env?: NodeJS.ProcessEnv): Promise<CliRunResult> {
   await ensureBuiltCli();
-  return runProcess(process.execPath, [distBinPath, ...args], repoRoot);
+  return runProcess(process.execPath, [distBinPath, ...args], repoRoot, env);
 }
 
-function runProcess(command: string, args: string[], cwd: string): Promise<CliRunResult> {
+function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  envOverrides?: NodeJS.ProcessEnv,
+): Promise<CliRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env: {
+        ...process.env,
+        ...envOverrides,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -269,6 +277,70 @@ describe("built CLI integration", () => {
       ]);
       expect(stdoutReport.metrics.ignoredPixels).toBe(120 * 20);
       expect(stdoutReport.summary.recommendation).toBe("pass");
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("reports a stable browser installation hint when Playwright Chromium is missing", async () => {
+    const dir = await createTempDir("peye-cli-missing-browser");
+    const referencePath = path.join(dir, "reference.png");
+    const outputPath = path.join(dir, "out");
+    const browserCachePath = path.join(dir, "empty-browsers");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 80,
+      body: `<rect x="20" y="20" width="80" height="24" rx="4" fill="#0b84ff" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <body style="margin:0">
+              <div style="width:120px;height:80px;background:#ffffff">
+                <div style="margin:20px;width:80px;height:24px;background:#0b84ff"></div>
+              </div>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCli(
+        [
+          "compare",
+          "--preview",
+          server.baseUrl,
+          "--reference",
+          referencePath,
+          "--output",
+          outputPath,
+          "--viewport",
+          "320x240",
+          "--report-stdout",
+        ],
+        {
+          PLAYWRIGHT_BROWSERS_PATH: browserCachePath,
+        },
+      );
+      const stdoutReport = JSON.parse(result.stdout) as CompareReport;
+
+      expect(result.code).toBe(3);
+      expect(result.stderr).toBe("");
+      expect(stdoutReport.error).not.toBeNull();
+      expect(stdoutReport.error?.code).toBe("preview_browser_missing");
+      expect(stdoutReport.error?.message).toContain("peye install chromium");
+      expect(stdoutReport.summary.reason).toContain("peye install chromium");
     } finally {
       await server.close();
     }

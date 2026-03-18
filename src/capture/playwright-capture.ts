@@ -1,6 +1,6 @@
 import { unlink } from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Locator, type Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import {
   DEFAULT_CAPTURE_DELAY_MS,
   DEFAULT_FONT_READY_TIMEOUT_MS,
@@ -12,6 +12,7 @@ import type { DomSnapshot, ParsedPreviewInput, PreparedPreviewImage } from "../t
 import type { BoundingBox, IgnoreSelectorReport } from "../types/report.js";
 import { AppError, ensureError } from "../utils/errors.js";
 import { normalizeImageToPng } from "../io/image.js";
+import { launchPlaywrightChromium } from "./playwright-runtime.js";
 
 export async function materializePreviewImage(
   preview: ParsedPreviewInput,
@@ -40,7 +41,7 @@ export async function materializePreviewImage(
   }
 
   const temporaryCapturePath = buildTemporaryCapturePath(outputPath);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchPlaywrightChromium();
   let domSnapshot: DomSnapshot | null;
   let ignoreSelection!: IgnoreSelectionResult;
 

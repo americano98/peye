@@ -30,10 +30,10 @@ The comparison core is intentionally separated from screenshot acquisition so th
 
 When Figma MCP returns a screenshot that is smaller than the selected node's metadata size, `peye` automatically upscales the reference image back to the node dimensions before diffing. If you need a strict export raster from Figma, force REST with `PEYE_FIGMA_SOURCE=rest`.
 
-If Playwright Chromium is missing, install it with:
+If you plan to capture a live preview URL, install the bundled Playwright Chromium once with:
 
 ```bash
-npx playwright install chromium
+peye install chromium
 ```
 
 ## Install
@@ -51,8 +51,11 @@ After publishing, install the CLI globally with:
 
 ```bash
 npm install -g @americano98/peye
+peye install chromium
 peye --help
 ```
+
+`peye install chromium` is only needed for live URL capture. Pure image-to-image comparison works without a browser download.
 
 `npm install` only installs the CLI. Agent integration files are kept in [`agents/`](./agents) and are not part of the published npm package.
 
@@ -381,7 +384,7 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 - `Preview URL requires --viewport`: pass `--viewport 1920` or `--viewport 1920x900` when `--preview` is a URL.
 - `--ignore-selector can only be used when --preview is a URL`: ignore selectors are resolved from live DOM elements, so local preview images are not supported.
 - `inputs.preview.ignoreSelectors[].matchedElementCount` is `0`: the selector matched no visible elements inside the captured area, so it had no effect on diffing.
-- Playwright cannot launch Chromium: install it with `npx playwright install chromium`.
+- `preview_browser_missing`: install the bundled browser with `peye install chromium`.
 - Figma URL falls back to REST unexpectedly: check `inputs.reference.transport` in `report.json` and ensure `PEYE_FIGMA_SOURCE` is not forcing `rest`.
 - Remote Figma MCP requires authorization: run `peye compare` in an interactive terminal so it can complete the OAuth callback flow.
 - `FIGMA_TOKEN is required`: either export `FIGMA_TOKEN`, or make sure a Figma MCP source is reachable for Figma URLs.
@@ -404,23 +407,23 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 If `peye` was installed globally, remove it with your package manager:
 
 ```bash
-npm uninstall -g peye
+npm uninstall -g @americano98/peye
 ```
 
 ```bash
-pnpm remove -g peye
+pnpm remove -g @americano98/peye
 ```
 
 If it was installed in a project, use:
 
 ```bash
-npm uninstall peye
+npm uninstall @americano98/peye
 ```
 
 or:
 
 ```bash
-pnpm remove peye
+pnpm remove @americano98/peye
 ```
 
 ## Development
