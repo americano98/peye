@@ -112,9 +112,7 @@ export function resolveViewportForReport(
 export function inferPreviewInputSource(
   options: Pick<CompareCommandOptions, "preview" | "selector" | "ignoreSelectors">,
 ): PreviewInputSourceReport {
-  const ignoreSelectors = buildIgnoreSelectorReports(
-    normalizeIgnoreSelectors(options.ignoreSelectors),
-  );
+  const ignoreSelectors = buildIgnoreSelectorReports(options.ignoreSelectors);
 
   if (isHttpUrl(options.preview)) {
     return {

@@ -11,7 +11,6 @@ import {
   buildIgnoreSelectorReports,
   inferPreviewInputSource,
   inferReferenceInputSource,
-  normalizeIgnoreSelectors,
   parsePreviewInput,
   parseReferenceInput,
   resolveViewportForReport,
@@ -270,7 +269,7 @@ function toPreviewSourceReport(
     selector: previewInput.selector,
     ignoreSelectors:
       preparedPreview?.ignoreSelectorMatches ??
-      buildIgnoreSelectorReports(normalizeIgnoreSelectors(options.ignoreSelectors)),
+      buildIgnoreSelectorReports(previewInput.ignoreSelectors),
   };
 }
 

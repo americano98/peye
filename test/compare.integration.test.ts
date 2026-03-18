@@ -1428,4 +1428,37 @@ describe("runCompare integration", () => {
     expect(report.artifacts.diff).toBeNull();
     expect(report.artifacts.heatmap).toBeNull();
   });
+
+  test("writes a failure report when ignore selectors are invalid before preview parsing completes", async () => {
+    const dir = await createTempDir("peye-invalid-ignore-selector");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 80,
+      body: `<rect x="10" y="10" width="100" height="60" fill="#0b84ff" />`,
+    });
+
+    const result = await runCompare(
+      await buildOptions({
+        preview: "http://localhost:3000",
+        reference: referencePath,
+        output: path.join(dir, "out"),
+        ignoreSelectors: [" "],
+      }),
+    );
+    const report = await readReport(result.report.artifacts.report);
+
+    expect(result.exitCode).toBe(1);
+    expect(report.error).toEqual({
+      code: "preview_ignore_selector_empty",
+      message: "--ignore-selector must not be empty.",
+      exitCode: 1,
+    });
+    expect(report.inputs.preview.ignoreSelectors).toEqual([
+      { selector: " ", matchedElementCount: null },
+    ]);
+    expect(report.artifacts.report).toBeTruthy();
+  });
 });
