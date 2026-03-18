@@ -1,6 +1,6 @@
 {
   "name": "@americano98/peye",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Standalone CLI for visual diffing UI screenshots against Figma references.",
   "type": "module",
   "packageManager": "pnpm@10.11.0",

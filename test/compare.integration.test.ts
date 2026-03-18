@@ -18,6 +18,7 @@ async function buildOptions(
     reference: "",
     output,
     mode: "all",
+    ignoreSelectors: [],
     fullPage: false,
     thresholdPass: 0.5,
     thresholdTolerated: 1.5,
@@ -266,6 +267,196 @@ describe("runCompare integration", () => {
     }
   });
 
+  test("ignores overlapping fixed preview noise and reports selector match counts", async () => {
+    const dir = await createTempDir("peye-ignore-fixed");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 240,
+      height: 140,
+      body: `
+        <rect x="20" y="20" width="160" height="40" fill="#0b84ff" />
+        <rect x="20" y="80" width="120" height="36" rx="8" fill="#333333" />
+      `,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 240px; height: 140px; }
+                #hero h1 {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  margin: 0;
+                  width: 160px;
+                  height: 40px;
+                  background: #0b84ff;
+                  font-size: 0;
+                  line-height: 0;
+                }
+                #hero button {
+                  position: absolute;
+                  left: 20px;
+                  top: 80px;
+                  width: 120px;
+                  height: 36px;
+                  border: 0;
+                  border-radius: 8px;
+                  background: #333333;
+                  color: transparent;
+                  font-size: 0;
+                }
+                #noise {
+                  position: fixed;
+                  top: 0;
+                  left: 0;
+                  width: 240px;
+                  height: 28px;
+                  background: #ff6633;
+                  pointer-events: none;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <h1>Hero</h1>
+                <button id="cta">Buy</button>
+              </section>
+              <div id="noise" class="noise" aria-hidden="true"></div>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const withoutIgnore = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "without-ignore"),
+          viewport: "400x240",
+        }),
+      );
+      const withIgnore = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "with-ignore"),
+          viewport: "400x240",
+          ignoreSelectors: ["#noise", " .noise ", "#noise"],
+        }),
+      );
+
+      expect(withoutIgnore.report.metrics.mismatchPercent).toBeGreaterThan(0);
+      expect(withoutIgnore.report.metrics.structuralMismatchPercent).toBeGreaterThan(0);
+      expect(withIgnore.report.summary.recommendation).toBe("pass");
+      expect(withIgnore.report.findings).toEqual([]);
+      expect(withIgnore.report.metrics.mismatchPercent).toBeLessThan(0.01);
+      expect(withIgnore.report.metrics.structuralMismatchPercent).toBeLessThan(0.5);
+      expect(withIgnore.report.metrics.ignoredPixels).toBe(240 * 28);
+      expect(withIgnore.report.metrics.ignoredPercent).toBe(20);
+      expect(withIgnore.report.inputs.preview.ignoreSelectors).toEqual([
+        { selector: "#noise", matchedElementCount: 1 },
+        { selector: ".noise", matchedElementCount: 1 },
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("reports zero matched ignore selectors when they do not intersect selector capture", async () => {
+    const dir = await createTempDir("peye-ignore-outside");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 80,
+      body: `<rect x="20" y="20" width="80" height="24" rx="4" fill="#0b84ff" />`,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                body { position: relative; min-height: 160px; }
+                #hero { position: relative; width: 120px; height: 80px; }
+                #hero button {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  width: 80px;
+                  height: 24px;
+                  border: 0;
+                  border-radius: 4px;
+                  background: #0b84ff;
+                  color: transparent;
+                  font-size: 0;
+                }
+                #outside-noise {
+                  position: absolute;
+                  top: 120px;
+                  left: 0;
+                  width: 80px;
+                  height: 20px;
+                  background: #ff6633;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <button id="cta">Buy</button>
+              </section>
+              <div id="outside-noise"></div>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "320x240",
+          ignoreSelectors: ["#outside-noise"],
+        }),
+      );
+
+      expect(result.report.summary.recommendation).toBe("pass");
+      expect(result.report.metrics.ignoredPixels).toBe(0);
+      expect(result.report.inputs.preview.ignoreSelectors).toEqual([
+        { selector: "#outside-noise", matchedElementCount: 0 },
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
   test("emits a text clipping signal for overflowing DOM text", async () => {
     const dir = await createTempDir("peye-text-clipping");
     const referencePath = path.join(dir, "reference.png");
@@ -484,6 +675,45 @@ describe("runCompare integration", () => {
     } finally {
       await server.close();
     }
+  });
+
+  test("rejects ignore selectors for local preview images", async () => {
+    const dir = await createTempDir("peye-ignore-path");
+    const previewPath = path.join(dir, "preview.png");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: previewPath,
+      width: 120,
+      height: 80,
+      body: `<rect x="10" y="10" width="100" height="60" fill="#0b84ff" />`,
+    });
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 80,
+      body: `<rect x="10" y="10" width="100" height="60" fill="#0b84ff" />`,
+    });
+
+    const result = await runCompare(
+      await buildOptions({
+        preview: previewPath,
+        reference: referencePath,
+        output: path.join(dir, "out"),
+        ignoreSelectors: ["#noise"],
+      }),
+    );
+    const report = await readReport(result.report.artifacts.report);
+
+    expect(result.exitCode).toBe(1);
+    expect(report.error).toEqual({
+      code: "preview_ignore_selector_requires_url",
+      message: "--ignore-selector can only be used when --preview is a URL.",
+      exitCode: 1,
+    });
+    expect(report.inputs.preview.ignoreSelectors).toEqual([
+      { selector: "#noise", matchedElementCount: null },
+    ]);
   });
 
   test("returns retry_fix for shifted local image with visual clusters", async () => {
@@ -1171,6 +1401,7 @@ describe("runCompare integration", () => {
         preview: "http://localhost:3000",
         reference: referencePath,
         output: path.join(dir, "out"),
+        ignoreSelectors: ["#noise"],
       }),
     );
     const report = await readReport(result.report.artifacts.report);
@@ -1187,11 +1418,47 @@ describe("runCompare integration", () => {
       reference: null,
       canvas: null,
     });
+    expect(report.inputs.preview.ignoreSelectors).toEqual([
+      { selector: "#noise", matchedElementCount: null },
+    ]);
     expect(report.findings).toEqual([]);
     expect(report.artifacts.preview).toBeNull();
     expect(report.artifacts.reference).toBeNull();
     expect(report.artifacts.overlay).toBeNull();
     expect(report.artifacts.diff).toBeNull();
     expect(report.artifacts.heatmap).toBeNull();
+  });
+
+  test("writes a failure report when ignore selectors are invalid before preview parsing completes", async () => {
+    const dir = await createTempDir("peye-invalid-ignore-selector");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 80,
+      body: `<rect x="10" y="10" width="100" height="60" fill="#0b84ff" />`,
+    });
+
+    const result = await runCompare(
+      await buildOptions({
+        preview: "http://localhost:3000",
+        reference: referencePath,
+        output: path.join(dir, "out"),
+        ignoreSelectors: [" "],
+      }),
+    );
+    const report = await readReport(result.report.artifacts.report);
+
+    expect(result.exitCode).toBe(1);
+    expect(report.error).toEqual({
+      code: "preview_ignore_selector_empty",
+      message: "--ignore-selector must not be empty.",
+      exitCode: 1,
+    });
+    expect(report.inputs.preview.ignoreSelectors).toEqual([
+      { selector: " ", matchedElementCount: null },
+    ]);
+    expect(report.artifacts.report).toBeTruthy();
   });
 });

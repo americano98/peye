@@ -9,6 +9,7 @@ The comparison core is intentionally separated from screenshot acquisition so th
 - Compare `preview` from a local screenshot or live URL
 - Compare `reference` from a local screenshot or Figma URL
 - Capture only a target element when the preview URL contains `#fragment`
+- Ignore selector-matched preview noise such as fixed, sticky, or third-party overlays during diffing
 - Generate a compact LLM-friendly `report.json`, `overlay.png`, `diff.png`, `heatmap.png`, plus normalized input images
 - Group mismatches by DOM element for URL previews and by visual cluster for local image previews
 - Expose structured failure metadata, normalized image dimensions, and per-finding hotspots for agent triage
@@ -29,10 +30,10 @@ The comparison core is intentionally separated from screenshot acquisition so th
 
 When Figma MCP returns a screenshot that is smaller than the selected node's metadata size, `peye` automatically upscales the reference image back to the node dimensions before diffing. If you need a strict export raster from Figma, force REST with `PEYE_FIGMA_SOURCE=rest`.
 
-If Playwright Chromium is missing, install it with:
+If you plan to capture a live preview URL, install the bundled Playwright Chromium once with:
 
 ```bash
-npx playwright install chromium
+peye install chromium
 ```
 
 ## Install
@@ -50,8 +51,11 @@ After publishing, install the CLI globally with:
 
 ```bash
 npm install -g @americano98/peye
+peye install chromium
 peye --help
 ```
+
+`peye install chromium` is only needed for live URL capture. Pure image-to-image comparison works without a browser download.
 
 `npm install` only installs the CLI. Agent integration files are kept in [`agents/`](./agents) and are not part of the published npm package.
 
@@ -78,6 +82,7 @@ peye compare \
   [--viewport 1920|1920x900] \
   [--mode all|pixel|layout|color] \
   [--selector <css>] \
+  [--ignore-selector <css>] \
   [--full-page] \
   [--quiet] \
   [--report-stdout] \
@@ -94,6 +99,9 @@ peye compare \
 - If `--preview` is a local image and `--viewport` is omitted, viewport is inferred from the image dimensions.
 - If `--preview` contains a hash, for example `https://example.com/#road-map`, `peye` automatically treats it as selector `#road-map` unless `--selector` is passed explicitly.
 - `--full-page` is allowed only for URL preview capture without a selector.
+- `--ignore-selector` is allowed only when `--preview` is a URL.
+- Repeat `--ignore-selector` to ignore multiple selectors.
+- Ignore selectors are normalized by trimming whitespace and dropping exact duplicates while preserving order.
 - If `--reference` is a Figma URL, it must include `node-id`.
 - `--quiet` suppresses the human-readable terminal summary.
 - `--report-stdout` writes the compact JSON report to stdout and suppresses the human-readable summary.
@@ -140,6 +148,18 @@ peye compare \
 ```
 
 By default this prefers Figma MCP. If MCP returns a downscaled screenshot, `peye` upsizes it to the node's Figma metadata dimensions before comparison so the reference stays aligned with the selected frame size.
+
+Ignore a fixed preview banner during comparison:
+
+```bash
+peye compare \
+  --preview http://localhost:3000/#hero \
+  --reference ./figma-export/hero.png \
+  --viewport 1920 \
+  --ignore-selector "#cookie-banner" \
+  --ignore-selector ".intercom-launcher" \
+  --output ./peye-output
+```
 
 Force REST fallback explicitly, for example in CI:
 
@@ -188,6 +208,7 @@ peye compare \
 
 - `analysisMode` is `dom-elements` for URL captures and `visual-clusters` for local image inputs
 - `images` preserves normalized preview, reference, and padded canvas dimensions for fast debugging
+- `inputs.preview.ignoreSelectors` records requested ignore selectors and how many visible elements actually intersected the capture area
 - `findings` is capped to the top actionable mismatches
 - `findings[].signals` adds stable heuristic hints such as probable text clipping, capture crop, and viewport mismatch
 - `findings[].hotspots` exposes the top mismatch subregions without forcing the caller to inspect images first
@@ -226,7 +247,11 @@ Example `report.json` shape:
       "input": "http://localhost:3000/#hero",
       "kind": "url",
       "resolved": "http://localhost:3000/#hero",
-      "selector": "#hero"
+      "selector": "#hero",
+      "ignoreSelectors": [
+        { "selector": "#cookie-banner", "matchedElementCount": 1 },
+        { "selector": ".intercom-launcher", "matchedElementCount": 0 }
+      ]
     },
     "reference": {
       "input": "https://www.figma.com/design/FILE_KEY/Mockup?node-id=1-2",
@@ -250,6 +275,8 @@ Example `report.json` shape:
   "metrics": {
     "mismatchPixels": 1234,
     "mismatchPercent": 3.21,
+    "ignoredPixels": 6720,
+    "ignoredPercent": 0.39,
     "meanColorDelta": 7.42,
     "maxColorDelta": 24.5,
     "structuralMismatchPercent": 8.13,
@@ -355,7 +382,9 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 ## Troubleshooting
 
 - `Preview URL requires --viewport`: pass `--viewport 1920` or `--viewport 1920x900` when `--preview` is a URL.
-- Playwright cannot launch Chromium: install it with `npx playwright install chromium`.
+- `--ignore-selector can only be used when --preview is a URL`: ignore selectors are resolved from live DOM elements, so local preview images are not supported.
+- `inputs.preview.ignoreSelectors[].matchedElementCount` is `0`: the selector matched no visible elements inside the captured area, so it had no effect on diffing.
+- `preview_browser_missing`: install the bundled browser with `peye install chromium`.
 - Figma URL falls back to REST unexpectedly: check `inputs.reference.transport` in `report.json` and ensure `PEYE_FIGMA_SOURCE` is not forcing `rest`.
 - Remote Figma MCP requires authorization: run `peye compare` in an interactive terminal so it can complete the OAuth callback flow.
 - `FIGMA_TOKEN is required`: either export `FIGMA_TOKEN`, or make sure a Figma MCP source is reachable for Figma URLs.
@@ -366,7 +395,8 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 ## Limitations
 
 - No config file support yet; inputs are provided through CLI flags only.
-- No mask support yet; every visible pixel participates in the comparison.
+- No arbitrary pixel mask file support yet; selector-based ignore masks only work for URL previews.
+- `--ignore-selector` ignores the matched element bounding boxes, not a pixel-perfect DOM silhouette.
 - No automatic geometric alignment step yet; mismatches are evaluated on the captured canvas as-is.
 - Browser capture currently uses Playwright Chromium.
 - DOM-based findings are heuristic and depend on the element boxes collected during capture.
@@ -377,23 +407,23 @@ Failure reports keep the same top-level shape and set `error` to a structured ob
 If `peye` was installed globally, remove it with your package manager:
 
 ```bash
-npm uninstall -g peye
+npm uninstall -g @americano98/peye
 ```
 
 ```bash
-pnpm remove -g peye
+pnpm remove -g @americano98/peye
 ```
 
 If it was installed in a project, use:
 
 ```bash
-npm uninstall peye
+npm uninstall @americano98/peye
 ```
 
 or:
 
 ```bash
-pnpm remove peye
+pnpm remove @americano98/peye
 ```
 
 ## Development

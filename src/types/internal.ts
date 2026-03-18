@@ -2,6 +2,7 @@ import type {
   AnalysisMode,
   BoundingBox,
   CompareReport,
+  IgnoreSelectorReport,
   RegionKind,
   ReferenceTransport,
   Recommendation,
@@ -19,12 +20,14 @@ export type CaptureEdge = "top" | "right" | "bottom" | "left";
 export interface UrlPreviewInput extends ResolvedInput {
   kind: "url";
   selector: string | null;
+  ignoreSelectors: string[];
   viewport: Viewport;
 }
 
 export interface PathPreviewInput extends ResolvedInput {
   kind: "path";
   selector: null;
+  ignoreSelectors: [];
   viewport: Viewport | null;
 }
 
@@ -84,6 +87,8 @@ export interface DomSnapshot {
 export interface PreparedPreviewImage extends PreparedImage {
   analysisMode: AnalysisMode;
   domSnapshot: DomSnapshot | null;
+  ignoreRegions: BoundingBox[];
+  ignoreSelectorMatches: IgnoreSelectorReport[];
 }
 
 export interface NormalizedImageData {

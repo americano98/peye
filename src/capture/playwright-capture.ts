@@ -1,6 +1,6 @@
 import { unlink } from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Locator, type Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import {
   DEFAULT_CAPTURE_DELAY_MS,
   DEFAULT_FONT_READY_TIMEOUT_MS,
@@ -9,8 +9,10 @@ import {
   DEFAULT_NAVIGATION_TIMEOUT_MS,
 } from "../config/defaults.js";
 import type { DomSnapshot, ParsedPreviewInput, PreparedPreviewImage } from "../types/internal.js";
+import type { BoundingBox, IgnoreSelectorReport } from "../types/report.js";
 import { AppError, ensureError } from "../utils/errors.js";
 import { normalizeImageToPng } from "../io/image.js";
+import { launchPlaywrightChromium } from "./playwright-runtime.js";
 
 export async function materializePreviewImage(
   preview: ParsedPreviewInput,
@@ -24,6 +26,8 @@ export async function materializePreviewImage(
         ...normalized,
         analysisMode: "visual-clusters",
         domSnapshot: null,
+        ignoreRegions: [],
+        ignoreSelectorMatches: [],
       };
     } catch (error) {
       throw new AppError(
@@ -37,8 +41,9 @@ export async function materializePreviewImage(
   }
 
   const temporaryCapturePath = buildTemporaryCapturePath(outputPath);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchPlaywrightChromium();
   let domSnapshot: DomSnapshot | null;
+  let ignoreSelection!: IgnoreSelectionResult;
 
   try {
     const page = await browser.newPage({
@@ -50,8 +55,20 @@ export async function materializePreviewImage(
     await waitForCaptureStability(page);
 
     if (preview.selector !== null) {
-      domSnapshot = await captureSelectorScreenshot(page, preview.selector, temporaryCapturePath);
+      const locator = page.locator(preview.selector).first();
+      await locator.waitFor({ state: "visible", timeout: DEFAULT_NAVIGATION_TIMEOUT_MS });
+      await locator.scrollIntoViewIfNeeded();
+      ignoreSelection = await collectSelectorIgnoreSelections(locator, preview.ignoreSelectors);
+      domSnapshot = await collectSelectorDomSnapshot(locator);
+      await locator.screenshot({
+        path: temporaryCapturePath,
+        animations: "disabled",
+        caret: "hide",
+        scale: "css",
+        type: "png",
+      });
     } else {
+      ignoreSelection = await collectPageIgnoreSelections(page, preview.ignoreSelectors, fullPage);
       domSnapshot = await collectPageDomSnapshot(page, fullPage);
       await page.screenshot({
         path: temporaryCapturePath,
@@ -62,6 +79,31 @@ export async function materializePreviewImage(
         type: "png",
       });
     }
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    if (preview.selector !== null) {
+      throw new AppError(
+        `Preview selector could not be captured: ${preview.selector}. ${ensureError(error).message}`,
+        {
+          exitCode: 3,
+          recommendation: "needs_human_review",
+          severity: "high",
+          code: "preview_selector_capture_failed",
+          cause: error,
+        },
+      );
+    }
+
+    throw new AppError(`Preview page could not be captured. ${ensureError(error).message}`, {
+      exitCode: 3,
+      recommendation: "needs_human_review",
+      severity: "high",
+      code: "preview_capture_failed",
+      cause: error,
+    });
   } finally {
     await browser.close();
   }
@@ -72,8 +114,14 @@ export async function materializePreviewImage(
       ...normalized,
       analysisMode: "dom-elements",
       domSnapshot,
+      ignoreRegions: ignoreSelection.ignoreRegions,
+      ignoreSelectorMatches: ignoreSelection.ignoreSelectorMatches,
     };
   } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
     throw new AppError(
       `Failed to normalize captured preview image: ${temporaryCapturePath}. ${ensureError(error).message}`,
       {
@@ -124,44 +172,255 @@ async function waitForCaptureStability(page: Page): Promise<void> {
   await page.waitForTimeout(DEFAULT_CAPTURE_DELAY_MS);
 }
 
-async function captureSelectorScreenshot(
-  page: Page,
-  selector: string,
-  outputPath: string,
-): Promise<DomSnapshot> {
-  try {
-    const locator = page.locator(selector).first();
-    await locator.waitFor({ state: "visible", timeout: DEFAULT_NAVIGATION_TIMEOUT_MS });
-    await locator.scrollIntoViewIfNeeded();
-    const domSnapshot = await collectSelectorDomSnapshot(locator);
-    await locator.screenshot({
-      path: outputPath,
-      animations: "disabled",
-      caret: "hide",
-      scale: "css",
-      type: "png",
-    });
-    return domSnapshot;
-  } catch (error) {
-    throw new AppError(
-      `Preview selector could not be captured: ${selector}. ${ensureError(error).message}`,
-      {
-        exitCode: 3,
-        recommendation: "needs_human_review",
-        severity: "high",
-        code: "preview_selector_capture_failed",
-        cause: error,
-      },
-    );
-  }
-}
-
 function buildTemporaryCapturePath(outputPath: string): string {
   const parsedPath = path.parse(outputPath);
   return path.join(
     parsedPath.dir,
     `${parsedPath.name}.capture-${process.pid}-${Date.now()}${parsedPath.ext || ".png"}`,
   );
+}
+
+interface IgnoreSelectionResult {
+  ignoreRegions: BoundingBox[];
+  ignoreSelectorMatches: IgnoreSelectorReport[];
+}
+
+async function collectSelectorIgnoreSelections(
+  locator: Locator,
+  ignoreSelectors: readonly string[],
+): Promise<IgnoreSelectionResult> {
+  if (ignoreSelectors.length === 0) {
+    return {
+      ignoreRegions: [],
+      ignoreSelectorMatches: [],
+    };
+  }
+
+  try {
+    return await locator.evaluate(
+      (root, selectors) => {
+        const captureBounds = (() => {
+          const rootRect = root.getBoundingClientRect();
+          return {
+            x: 0,
+            y: 0,
+            width: Math.max(1, Math.round(rootRect.width)),
+            height: Math.max(1, Math.round(rootRect.height)),
+            rootLeft: rootRect.left,
+            rootTop: rootRect.top,
+          };
+        })();
+        const isVisible = (element: Element): boolean => {
+          const rect = element.getBoundingClientRect();
+
+          if (rect.width <= 0 || rect.height <= 0) {
+            return false;
+          }
+
+          const style = window.getComputedStyle(element);
+          return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+        };
+        const clipBoxToBounds = (
+          box: { x: number; y: number; width: number; height: number },
+          bounds: { x: number; y: number; width: number; height: number },
+        ) => {
+          const left = Math.max(bounds.x, box.x);
+          const top = Math.max(bounds.y, box.y);
+          const right = Math.min(bounds.x + bounds.width, box.x + box.width);
+          const bottom = Math.min(bounds.y + bounds.height, box.y + box.height);
+
+          if (right <= left || bottom <= top) {
+            return null;
+          }
+
+          const clippedLeft = Math.floor(left);
+          const clippedTop = Math.floor(top);
+          const clippedRight = Math.ceil(right);
+          const clippedBottom = Math.ceil(bottom);
+
+          return {
+            x: clippedLeft,
+            y: clippedTop,
+            width: clippedRight - clippedLeft,
+            height: clippedBottom - clippedTop,
+          };
+        };
+        const ignoreRegions: BoundingBox[] = [];
+        const ignoreSelectorMatches = selectors.map((selector) => {
+          let matchedElementCount = 0;
+
+          for (const element of Array.from(document.querySelectorAll(selector))) {
+            if (!isVisible(element)) {
+              continue;
+            }
+
+            const rect = element.getBoundingClientRect();
+            const region = clipBoxToBounds(
+              {
+                x: rect.left - captureBounds.rootLeft,
+                y: rect.top - captureBounds.rootTop,
+                width: rect.width,
+                height: rect.height,
+              },
+              captureBounds,
+            );
+
+            if (!region) {
+              continue;
+            }
+
+            ignoreRegions.push(region);
+            matchedElementCount += 1;
+          }
+
+          return {
+            selector,
+            matchedElementCount,
+          };
+        });
+
+        return {
+          ignoreRegions,
+          ignoreSelectorMatches,
+        };
+      },
+      [...ignoreSelectors],
+    );
+  } catch (error) {
+    throw new AppError(
+      `Failed to resolve --ignore-selector within selector capture. ${ensureError(error).message}`,
+      {
+        code: "preview_ignore_selector_resolution_failed",
+        cause: error,
+      },
+    );
+  }
+}
+
+async function collectPageIgnoreSelections(
+  page: Page,
+  ignoreSelectors: readonly string[],
+  fullPage: boolean,
+): Promise<IgnoreSelectionResult> {
+  if (ignoreSelectors.length === 0) {
+    return {
+      ignoreRegions: [],
+      ignoreSelectorMatches: [],
+    };
+  }
+
+  try {
+    return await page.evaluate(
+      ({ selectors, fullPageCapture }) => {
+        const captureBounds = fullPageCapture
+          ? {
+              x: 0,
+              y: 0,
+              width: Math.max(
+                document.documentElement.scrollWidth,
+                document.body?.scrollWidth ?? 0,
+                window.innerWidth,
+              ),
+              height: Math.max(
+                document.documentElement.scrollHeight,
+                document.body?.scrollHeight ?? 0,
+                window.innerHeight,
+              ),
+            }
+          : {
+              x: 0,
+              y: 0,
+              width: window.innerWidth,
+              height: window.innerHeight,
+            };
+        const isVisible = (element: Element): boolean => {
+          const rect = element.getBoundingClientRect();
+
+          if (rect.width <= 0 || rect.height <= 0) {
+            return false;
+          }
+
+          const style = window.getComputedStyle(element);
+          return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+        };
+        const clipBoxToBounds = (
+          box: { x: number; y: number; width: number; height: number },
+          bounds: { x: number; y: number; width: number; height: number },
+        ) => {
+          const left = Math.max(bounds.x, box.x);
+          const top = Math.max(bounds.y, box.y);
+          const right = Math.min(bounds.x + bounds.width, box.x + box.width);
+          const bottom = Math.min(bounds.y + bounds.height, box.y + box.height);
+
+          if (right <= left || bottom <= top) {
+            return null;
+          }
+
+          const clippedLeft = Math.floor(left);
+          const clippedTop = Math.floor(top);
+          const clippedRight = Math.ceil(right);
+          const clippedBottom = Math.ceil(bottom);
+
+          return {
+            x: clippedLeft,
+            y: clippedTop,
+            width: clippedRight - clippedLeft,
+            height: clippedBottom - clippedTop,
+          };
+        };
+        const ignoreRegions: BoundingBox[] = [];
+        const ignoreSelectorMatches = selectors.map((selector) => {
+          let matchedElementCount = 0;
+
+          for (const element of Array.from(document.querySelectorAll(selector))) {
+            if (!isVisible(element)) {
+              continue;
+            }
+
+            const rect = element.getBoundingClientRect();
+            const region = clipBoxToBounds(
+              {
+                x: fullPageCapture ? rect.left + window.scrollX : rect.left,
+                y: fullPageCapture ? rect.top + window.scrollY : rect.top,
+                width: rect.width,
+                height: rect.height,
+              },
+              captureBounds,
+            );
+
+            if (!region) {
+              continue;
+            }
+
+            ignoreRegions.push(region);
+            matchedElementCount += 1;
+          }
+
+          return {
+            selector,
+            matchedElementCount,
+          };
+        });
+
+        return {
+          ignoreRegions,
+          ignoreSelectorMatches,
+        };
+      },
+      {
+        selectors: [...ignoreSelectors],
+        fullPageCapture: fullPage,
+      },
+    );
+  } catch (error) {
+    throw new AppError(
+      `Failed to resolve --ignore-selector on the preview page. ${ensureError(error).message}`,
+      {
+        code: "preview_ignore_selector_resolution_failed",
+        cause: error,
+      },
+    );
+  }
 }
 
 async function collectSelectorDomSnapshot(locator: Locator): Promise<DomSnapshot> {

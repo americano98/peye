@@ -62,6 +62,8 @@ export function createFailureReport(params: {
   const emptyMetrics: MetricsReport = {
     mismatchPixels: 0,
     mismatchPercent: 0,
+    ignoredPixels: 0,
+    ignoredPercent: 0,
     meanColorDelta: null,
     maxColorDelta: null,
     structuralMismatchPercent: null,

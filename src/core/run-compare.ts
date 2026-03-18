@@ -8,6 +8,7 @@ import { createHeatmapArtifact } from "../compare/heatmap.js";
 import { ensureDirectory, pathExists, writeJsonFile } from "../io/fs.js";
 import { loadNormalizedImage, padImageToCanvas, writeRawRgbaPng } from "../io/image.js";
 import {
+  buildIgnoreSelectorReports,
   inferPreviewInputSource,
   inferReferenceInputSource,
   parsePreviewInput,
@@ -27,7 +28,7 @@ import type {
 import type {
   CompareCommandOptions,
   CompareReport,
-  InputSourceReport,
+  PreviewInputSourceReport,
   Recommendation,
   ReferenceInputSourceReport,
 } from "../types/report.js";
@@ -65,6 +66,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
       preview: paddedPreview.data,
       width,
       height,
+      ignoreRegions: preparedPreview.ignoreRegions,
       referenceOriginal: {
         width: referenceImage.width,
         height: referenceImage.height,
@@ -121,6 +123,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
           kind: previewInput.kind,
           resolved: previewInput.resolved,
           selector: previewInput.selector,
+          ignoreSelectors: preparedPreview.ignoreSelectorMatches,
         },
         reference: {
           input: referenceInput.input,
@@ -160,7 +163,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
         reason: error.message,
         recommendation: error.recommendation ?? "needs_human_review",
         severity: error.severity ?? (error.exitCode === 1 ? "medium" : "high"),
-        preview: toPreviewSourceReport(previewInput, options),
+        preview: toPreviewSourceReport(previewInput, options, preparedPreview),
         reference: toReferenceSourceReport(referenceInput, options.reference, preparedReference),
         viewport: previewInput?.viewport ?? null,
         analysisMode: preparedPreview?.analysisMode ?? inferAnalysisMode(previewInput, options),
@@ -252,8 +255,9 @@ function createArtifactPaths(outputDir: string): CompareArtifacts {
 
 function toPreviewSourceReport(
   previewInput: ParsedPreviewInput | null,
-  options: Pick<CompareCommandOptions, "preview" | "selector">,
-): InputSourceReport {
+  options: Pick<CompareCommandOptions, "preview" | "selector" | "ignoreSelectors">,
+  preparedPreview: PreparedPreviewImage | null = null,
+): PreviewInputSourceReport {
   if (!previewInput) {
     return inferPreviewInputSource(options);
   }
@@ -263,6 +267,9 @@ function toPreviewSourceReport(
     kind: previewInput.kind,
     resolved: previewInput.resolved,
     selector: previewInput.selector,
+    ignoreSelectors:
+      preparedPreview?.ignoreSelectorMatches ??
+      buildIgnoreSelectorReports(previewInput.ignoreSelectors),
   };
 }
 

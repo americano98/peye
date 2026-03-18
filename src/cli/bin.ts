@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import packageJson from "../../package.json" with { type: "json" };
 import { registerCompareCommand, handleCliError } from "./compare-command.js";
+import { registerInstallCommand } from "./install-command.js";
 
 const program = new Command();
 
@@ -17,5 +18,6 @@ program
   .showHelpAfterError();
 
 registerCompareCommand(program);
+registerInstallCommand(program);
 
 program.parseAsync(process.argv).catch(handleCliError);

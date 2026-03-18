@@ -1,60 +1,64 @@
 ---
 name: peye
-description: Use this skill when you need to compare an implemented UI against a Figma frame or another screenshot with the local `peye` CLI. Trigger for requests about pixel-perfect validation, screenshot-vs-design comparison, Figma-to-implementation diffing, live preview URL capture, hash-fragment element capture, or machine-readable visual validation reports.
+description: Use this skill when you need to validate an implemented UI against a Figma frame or another screenshot with the local `peye` CLI. Trigger for visual validation, screenshot-vs-design comparison, Figma-to-implementation diffing, live preview URL capture, or agentic fix loops where the agent should compare, inspect the report, improve the implementation, and rerun.
 ---
 
 # `peye` Skill
 
-Use `peye` to produce a deterministic visual diff report from a preview and a reference.
+Use `peye` to compare a preview against a reference and decide what to do next.
 
-## Use This Workflow
+This tool is for validation, not generation. The main contract is `report.json`.
 
-1. Identify the preview source.
-2. Identify the reference source.
-3. Choose an output directory.
-4. Run `peye compare`.
-5. Read `report.json` first.
-6. Use `heatmap.png`, `overlay.png`, and `diff.png` to explain the mismatch cause.
+## When To Use It
 
-Prefer `report.json` for machine decisions. Prefer `heatmap.png` and `overlay.png` for human triage.
-If `report.json` contains `error`, trust `error.code` before any heuristic interpretation of mismatch metrics.
+Use `peye` when an agent needs to:
 
-## Inputs
+- compare an implemented UI against Figma or another screenshot
+- capture a live preview URL at a fixed viewport
+- validate a single page section via URL hash or `--selector`
+- run a compare -> inspect -> fix -> rerun loop
 
-Preview:
+## Agent Stance
 
-- Local screenshot path
-- HTTP or HTTPS URL
+- Treat `report.json` as the primary result.
+- Trust `summary.recommendation`, `error.code`, `findings`, and `signals` more than your visual guess from the PNGs.
+- Use `heatmap.png`, `overlay.png`, and `diff.png` as supporting evidence, not the main contract.
+- If `recommendation` is `retry_fix` and the agent is actively implementing that UI, the default action is to try to improve the implementation and rerun.
+- If `recommendation` is `needs_human_review`, do not keep auto-tuning blindly. First verify setup: viewport, selector, reference target, and capture scope.
 
-Reference:
+## Minimal Workflow
 
-- Local screenshot path
-- Figma URL with `node-id`
+1. Choose the preview:
+   - local screenshot path, or
+   - `http://` / `https://` URL
+2. Choose the reference:
+   - local screenshot path, or
+   - Figma URL with `node-id`
+3. Pick one scratch output directory under `./tmp/peye/` for the current target.
+4. Before each rerun, remove that scratch directory and recreate it so only the latest `peye` iteration remains.
+5. Run `peye compare`.
+6. Read `report.json` first.
+7. If needed, inspect `heatmap.png` and `overlay.png`.
 
-Viewport:
+## Cleanup Rule
 
-- Required when preview is a URL
-- Accept `WIDTH` or `WIDTHxHEIGHT`
-- If only width is passed, use default height `900`
-- Optional when preview is a local image
+Do not keep every historical `peye` run.
 
-Selector behavior:
+- Always write `peye` artifacts under `./tmp/peye/<target>`.
+- Reuse one scratch output directory per target, for example `./tmp/peye/hero`.
+- Before rerunning, delete the old directory you created, then run again into the same path.
+- Leave only the latest iteration artifacts unless the user explicitly asks to keep history.
 
-- If preview URL contains a hash fragment, for example `https://example.com/#road-map`, treat it as selector `#road-map` unless `--selector` is explicitly passed.
-- If `--selector` is passed, it overrides the hash-derived selector.
-- Do not combine `--full-page` with selector-based capture.
+Example pattern:
 
-Figma behavior:
+```bash
+rm -rf ./tmp/peye/hero
+peye compare ... --output ./tmp/peye/hero
+```
 
-- Prefer Figma MCP when reference is a Figma URL.
-- Require `node-id` in the Figma URL.
-- If MCP returns a screenshot smaller than the node metadata size, expect `peye` to upscale the reference back to the node dimensions before diffing.
-- Fall back to `FIGMA_TOKEN` only when MCP is unavailable or explicitly forced through `PEYE_FIGMA_SOURCE=rest`.
-- If a strict original export raster is required, prefer `PEYE_FIGMA_SOURCE=rest` with `FIGMA_TOKEN`.
+Only delete scratch output directories created for `peye`. Do not delete user-owned assets or reference files.
 
 ## Command
-
-Use the built CLI in published or built environments:
 
 ```bash
 peye compare \
@@ -64,160 +68,123 @@ peye compare \
   [--viewport 1920|1920x900] \
   [--mode all|pixel|layout|color] \
   [--selector <css>] \
+  [--ignore-selector <css>] \
   [--full-page] \
   [--quiet] \
-  [--report-stdout] \
-  [--threshold-pass 0.5] \
-  [--threshold-tolerated 1.5] \
-  [--threshold-retry 5]
+  [--report-stdout]
 ```
 
-When working inside this repository before publish, prefer:
+Inside this repository, use:
 
 ```bash
 node dist/bin.js compare ...
 ```
 
-If the build is stale, run:
+If needed:
 
 ```bash
 pnpm build
 ```
 
-## Recommended Invocation Patterns
+## Important Rules
 
-Compare two local images:
+- `--viewport` is required when `--preview` is a URL.
+- If preview URL has a hash fragment, `peye` treats it as the target selector unless `--selector` is passed explicitly.
+- Do not combine `--full-page` with selector-based capture.
+- `--ignore-selector` is for live-page noise such as fixed, sticky, cookie, chat, or third-party overlays.
+- Repeat `--ignore-selector` for multiple selectors.
+- `--ignore-selector` works only for URL previews.
+- `--ignore-selector` ignores matched element bounding boxes, not pixel-perfect silhouettes.
+- If Figma is the reference, prefer the exact frame/section the implementation is supposed to match.
 
-```bash
-peye compare \
-  --preview ./preview.png \
-  --reference ./reference.png \
-  --output ./tmp/peye
-```
+## Recommended Patterns
 
-Compare a live page section against Figma:
-
-```bash
-peye compare \
-  --preview http://localhost:3000/#hero \
-  --reference "https://www.figma.com/design/FILE_KEY/Frame?node-id=1-2" \
-  --viewport 1920 \
-  --output ./tmp/peye
-```
-
-Force REST fallback when needed:
+Compare a live section against Figma:
 
 ```bash
-PEYE_FIGMA_SOURCE=rest \
-FIGMA_TOKEN=... \
+rm -rf ./tmp/peye/hero
 peye compare \
   --preview http://localhost:3000/#hero \
   --reference "https://www.figma.com/design/FILE_KEY/Frame?node-id=1-2" \
   --viewport 1920 \
-  --output ./tmp/peye
+  --output ./tmp/peye/hero
 ```
 
-Compare a live page with an explicit selector:
+Ignore noisy overlays:
 
 ```bash
+rm -rf ./tmp/peye/hero
 peye compare \
-  --preview http://localhost:3000 \
-  --selector "#pricing-card" \
-  --reference ./figma/pricing-card.png \
-  --viewport 1280 \
-  --output ./tmp/peye
+  --preview http://localhost:3000/#hero \
+  --reference ./figma/hero.png \
+  --viewport 1920 \
+  --ignore-selector "#cookie-banner" \
+  --ignore-selector ".intercom-launcher" \
+  --output ./tmp/peye/hero
 ```
 
-Emit the full report JSON to stdout for automation:
+Emit JSON to stdout for automation:
 
 ```bash
+rm -rf ./tmp/peye/run
 peye compare \
   --preview ./preview.png \
   --reference ./reference.png \
-  --output ./tmp/peye \
+  --output ./tmp/peye/run \
   --report-stdout
 ```
 
-## Interpret Results
+## How To Read The Result
 
-Read `summary.recommendation`:
+Read these first:
 
-- `pass`: strict match
-- `pass_with_tolerated_differences`: small acceptable drift
-- `retry_fix`: localized fixable issues
-- `needs_human_review`: strong size mismatch, ambiguous diff, or invalid target
+- `summary.recommendation`
+- `summary.reason`
+- `error`
+- `findings`
+- `signals`
 
-Read `metrics`:
+Interpret `summary.recommendation` like this:
 
-- `mismatchPercent`: overall mismatch percentage
-- `meanColorDelta` and `maxColorDelta`: color drift
-- `structuralMismatchPercent`: layout or edge mismatch
-- `dimensionMismatch`: width, height, and aspect-ratio differences
-- `findingsCount`: total actionable findings before capping
-- `affectedElementCount`: number of DOM elements implicated in URL mode
+- `pass`: good enough, usually stop
+- `pass_with_tolerated_differences`: small drift, usually stop unless the user wants a tighter match
+- `retry_fix`: fix the top issue and rerun
+- `needs_human_review`: likely setup problem, ambiguous comparison, or too-large mismatch
 
-Read `images`:
+Use these fields for diagnosis:
 
-- `preview` and `reference`: normalized dimensions of each input used by the comparison
-- `canvas`: padded comparison canvas after normalization
-- Use these fields to detect wrong viewport, wrong frame selection, or large size drift before reading screenshots
+- `metrics.mismatchPercent`: overall mismatch level
+- `metrics.ignoredPixels` and `metrics.ignoredPercent`: excluded area from `--ignore-selector`
+- `metrics.structuralMismatchPercent`: layout-sensitive drift
+- `findings[]`: main actionable mismatches
+- `findings[].element.selector`: the likely DOM target in URL mode
+- `findings[].signals[].code`: stable automation hint
 
-Read `analysisMode`:
+If `inputs.preview.ignoreSelectors[].matchedElementCount` is `0`, that ignore rule did nothing in the current capture.
 
-- `dom-elements`: preview came from a URL and mismatches were grouped by DOM element
-- `visual-clusters`: preview came from an image and mismatches were grouped by visual cluster
+If `error` is non-null, treat `error.code` as the stable automation key.
 
-Read `rollups`:
+## Fix Loop Guidance
 
-- `rawRegionCount`: total internal mismatch fragments before aggregation
-- `bySeverity` and `byKind`: compact breakdown of actionable findings
-- `byTag`: top affected HTML tags in DOM mode
-- `omittedFindings`: how many lower-priority findings were truncated from the top list
+When using `peye` during implementation:
 
-Read `findings`:
+1. Run compare.
+2. Read `report.json`.
+3. If setup is wrong, fix setup first:
+   - wrong viewport
+   - wrong Figma node
+   - wrong selector
+   - wrong area captured
+   - missing ignore selector for obvious page noise
+4. If setup is sound and recommendation is `retry_fix`, fix the implementation.
+5. Rerun `peye` into the same cleaned scratch directory.
+6. Stop when the result is `pass`, `pass_with_tolerated_differences`, or escalates to `needs_human_review`.
 
-- Use `kind` to separate `pixel`, `color`, `layout`, `mixed`, and `dimension` issues
-- Use `summary`, `issueTypes`, `signals`, `bbox`, and `hotspots` to drive the next fix
-- In URL mode, use `element.tag`, `element.selector`, and `element.textSnippet` to identify the exact target in code
-- Treat `signals[].code` as the stable automation key and `signals[].confidence` as the reliability hint for the heuristic
-
-Read `signals`:
-
-- `probable_text_clipping`: text in the captured preview element overflowed its box and the CSS indicates it is being clipped. This is usually a medium-confidence signal and becomes stronger when the element uses explicit clipping such as `overflow: hidden`, `overflow: clip`, `text-overflow: ellipsis`, or line clamping.
-- `possible_capture_crop`: the preview capture clipped the element bounds at the selector or screenshot boundary. This is a high-confidence signal for capture framing problems and should usually be investigated before tweaking implementation styles.
-- `possible_viewport_mismatch`: a dimension mismatch reaches the comparison canvas edge, suggesting the viewport, selected frame, or target region may be wrong. This is a medium-confidence setup signal, not proof that the rendered UI itself is wrong.
-
-Signal validity guidance:
-
-- Prefer `possible_capture_crop` over lower-level mismatch interpretation when it is present.
-- Treat `probable_text_clipping` as evidence about the preview capture only. It does not prove that the reference intended a longer visible string, but it is a strong hint when the affected element also has text and styling mismatch.
-- Treat `possible_viewport_mismatch` as a rerun/setup-check signal. Verify viewport, frame selection, and selector scope before making code edits based on it.
-
-Read `error`:
-
-- `null` on successful compare runs
-- On failure reports, use `error.code` as the stable automation key and `error.message` as the human-readable explanation
-- Treat exit code `1` plus `error.code` as an input or environment problem to fix before rerunning
-
-Read `artifacts`:
-
-- `heatmap.png`: best first image for triage
-- `overlay.png`: best image for alignment issues
-- `diff.png`: best image for raw pixel mismatch inspection
+Do not keep editing forever on a `needs_human_review` result unless the cause is clearly understood.
 
 ## Exit Codes
 
 - `0`: pass or tolerated pass
 - `2`: retry fix
 - `3`: needs human review
-- `1`: operational error
-
-## Practical Guidance
-
-- Keep output directories per run to avoid mixing artifacts.
-- Fix selector or viewport issues before trusting visual mismatch metrics.
-- Prefer `--mode all` unless the user wants a narrower diagnostic pass.
-- If the task is to automate a validate-and-fix loop, use `report.json` as the contract and the images as supporting evidence.
-- Use `--report-stdout` when another tool needs the report directly from stdout.
-- Use `--quiet` when the caller only cares about exit code plus on-disk artifacts.
-- Suggested loop: exit code `0` accept, exit code `2` fix top finding and rerun, exit code `3` stop for human review, exit code `1` inspect `error.code` and repair inputs or environment before retrying.
+- `1`: operational or input error
