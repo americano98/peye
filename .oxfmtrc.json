@@ -1,0 +1,14 @@
+{
+  "ignorePatterns": [
+    "coverage/**",
+    "dist/**",
+    "node_modules/**",
+    "peye-output/**",
+    "playwright-report/**",
+    "test-output/**",
+    "*.tgz"
+  ],
+  "printWidth": 100,
+  "sortPackageJson": true,
+  "trailingComma": "all"
+}
