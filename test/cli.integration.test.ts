@@ -345,4 +345,44 @@ describe("built CLI integration", () => {
       await server.close();
     }
   });
+
+  test("writes a structured failure report for invalid ignore selectors from the CLI", async () => {
+    const dir = await createTempDir("peye-cli-invalid-ignore-selector");
+    const referencePath = path.join(dir, "reference.png");
+    const outputPath = path.join(dir, "out");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 120,
+      height: 80,
+      body: `<rect x="20" y="20" width="80" height="24" rx="4" fill="#0b84ff" />`,
+    });
+
+    const result = await runCli([
+      "compare",
+      "--preview",
+      "http://localhost:3000",
+      "--reference",
+      referencePath,
+      "--output",
+      outputPath,
+      "--ignore-selector",
+      " ",
+      "--report-stdout",
+    ]);
+    const stdoutReport = JSON.parse(result.stdout) as CompareReport;
+    const writtenReport = await readReport(path.join(outputPath, "report.json"));
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe("");
+    expect(stdoutReport.error).toEqual({
+      code: "preview_ignore_selector_empty",
+      message: "--ignore-selector must not be empty.",
+      exitCode: 1,
+    });
+    expect(stdoutReport.inputs.preview.ignoreSelectors).toEqual([
+      { selector: " ", matchedElementCount: null },
+    ]);
+    expect(stdoutReport).toEqual(writtenReport);
+  });
 });

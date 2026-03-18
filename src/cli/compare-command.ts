@@ -2,7 +2,6 @@ import path from "node:path";
 import type { Command } from "commander";
 import { DEFAULT_MODE, DEFAULT_THRESHOLDS } from "../config/defaults.js";
 import { runCompare } from "../core/run-compare.js";
-import { normalizeIgnoreSelectors } from "../io/inputs.js";
 import { COMPARE_MODES, type CompareCommandOptions } from "../types/report.js";
 import { AppError, isAppError } from "../utils/errors.js";
 
@@ -99,7 +98,7 @@ function validateOptions(
 
   return {
     ...options,
-    ignoreSelectors: normalizeIgnoreSelectors(options.ignoreSelector),
+    ignoreSelectors: options.ignoreSelector ?? [],
   };
 }
 
