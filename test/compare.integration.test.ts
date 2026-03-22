@@ -296,6 +296,79 @@ describe("runCompare integration", () => {
     }
   });
 
+  test("waits for selector layout to stabilize before capture", async () => {
+    const dir = await createTempDir("peye-stability");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 240,
+      height: 140,
+      body: `
+        <rect x="20" y="20" width="160" height="40" fill="#0b84ff" />
+      `,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 240px; height: 140px; }
+                #hero .panel {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  width: 120px;
+                  height: 40px;
+                  background: #0b84ff;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <div class="panel"></div>
+              </section>
+              <script>
+                window.setTimeout(() => {
+                  const panel = document.querySelector('#hero .panel');
+                  if (panel) {
+                    panel.style.width = '160px';
+                  }
+                }, 120);
+              </script>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "400x240",
+          mode: "layout",
+        }),
+      );
+
+      expect(result.report.summary.recommendation).toBe("pass");
+      expect(result.report.findings).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
   test("ignores overlapping fixed preview noise and reports selector match counts", async () => {
     const dir = await createTempDir("peye-ignore-fixed");
     const referencePath = path.join(dir, "reference.png");

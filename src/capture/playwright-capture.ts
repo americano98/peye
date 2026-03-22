@@ -2,7 +2,6 @@ import { unlink } from "node:fs/promises";
 import path from "node:path";
 import type { Locator, Page } from "playwright";
 import {
-  DEFAULT_CAPTURE_DELAY_MS,
   DEFAULT_FONT_READY_TIMEOUT_MS,
   DEFAULT_MAX_SELECTOR_LENGTH,
   DEFAULT_MAX_TEXT_SNIPPET_LENGTH,
@@ -52,12 +51,12 @@ export async function materializePreviewImage(
     });
 
     await navigateForCapture(page, preview.resolved);
-    await waitForCaptureStability(page);
 
     if (preview.selector !== null) {
       const locator = page.locator(preview.selector).first();
       await locator.waitFor({ state: "visible", timeout: DEFAULT_NAVIGATION_TIMEOUT_MS });
       await locator.scrollIntoViewIfNeeded();
+      await waitForCaptureStability(page, locator);
       ignoreSelection = await collectSelectorIgnoreSelections(locator, preview.ignoreSelectors);
       domSnapshot = await collectSelectorDomSnapshot(locator);
       await locator.screenshot({
@@ -68,6 +67,7 @@ export async function materializePreviewImage(
         type: "png",
       });
     } else {
+      await waitForCaptureStability(page);
       ignoreSelection = await collectPageIgnoreSelections(page, preview.ignoreSelectors, fullPage);
       domSnapshot = await collectPageDomSnapshot(page, fullPage);
       await page.screenshot({
@@ -135,20 +135,21 @@ export async function materializePreviewImage(
 }
 
 async function navigateForCapture(page: Page, url: string): Promise<void> {
-  try {
-    await page.goto(url, {
-      waitUntil: "networkidle",
-      timeout: DEFAULT_NAVIGATION_TIMEOUT_MS,
-    });
-  } catch {
-    await page.goto(url, {
-      waitUntil: "load",
-      timeout: DEFAULT_NAVIGATION_TIMEOUT_MS,
-    });
-  }
+  await page.goto(url, {
+    waitUntil: "domcontentloaded",
+    timeout: DEFAULT_NAVIGATION_TIMEOUT_MS,
+  });
 }
 
-async function waitForCaptureStability(page: Page): Promise<void> {
+async function waitForCaptureStability(
+  page: Page,
+  locator?: Locator,
+): Promise<void> {
+  await waitForFontsReady(page);
+  await waitForLayoutStability(page, locator);
+}
+
+async function waitForFontsReady(page: Page): Promise<void> {
   await page
     .evaluate(
       async ({ fontTimeoutMs }) => {
@@ -168,8 +169,65 @@ async function waitForCaptureStability(page: Page): Promise<void> {
       { fontTimeoutMs: DEFAULT_FONT_READY_TIMEOUT_MS },
     )
     .catch(() => undefined);
+}
 
-  await page.waitForTimeout(DEFAULT_CAPTURE_DELAY_MS);
+async function waitForLayoutStability(page: Page, locator?: Locator): Promise<void> {
+  const maxAttempts = 8;
+  const intervalMs = 75;
+  let previousSample: string | null = null;
+  let stableCount = 0;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const sample = locator
+      ? await sampleLocatorLayout(locator)
+      : await samplePageLayout(page);
+
+    if (sample && sample === previousSample) {
+      stableCount += 1;
+
+      if (stableCount >= 2) {
+        return;
+      }
+    } else {
+      stableCount = 0;
+      previousSample = sample;
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await page.waitForTimeout(intervalMs);
+    }
+  }
+}
+
+async function sampleLocatorLayout(locator: Locator): Promise<string | null> {
+  const box = await locator.boundingBox().catch(() => null);
+
+  if (!box) {
+    return null;
+  }
+
+  return JSON.stringify({
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    width: Math.round(box.width),
+    height: Math.round(box.height),
+  });
+}
+
+async function samplePageLayout(page: Page): Promise<string | null> {
+  return page
+    .evaluate(() => {
+      const doc = document.documentElement;
+      const body = document.body;
+
+      return JSON.stringify({
+        innerWidth: Math.round(window.innerWidth),
+        innerHeight: Math.round(window.innerHeight),
+        scrollWidth: Math.round(Math.max(doc.scrollWidth, body?.scrollWidth ?? 0)),
+        scrollHeight: Math.round(Math.max(doc.scrollHeight, body?.scrollHeight ?? 0)),
+      });
+    })
+    .catch(() => null);
 }
 
 function buildTemporaryCapturePath(outputPath: string): string {
