@@ -109,6 +109,19 @@ export const DECISION_TRACE_METRIC_KEYS = [
   "dimensionMismatch",
 ] as const;
 export const SIGNAL_CONFIDENCES = ["low", "medium", "high"] as const;
+export const CORRESPONDENCE_METHODS = ["template", "template+edge", "projected", "none"] as const;
+export const GEOMETRY_SHIFT_LEVELS = ["none", "small", "medium", "large"] as const;
+export const GEOMETRY_DOMINANT_DRIFTS = ["none", "position", "size", "mixed"] as const;
+export const SIBLING_RELATION_AXES = ["horizontal", "vertical"] as const;
+export const SIBLING_RELATION_DOMINANT_DRIFTS = ["none", "spacing", "alignment", "mixed"] as const;
+export const TEXT_VALIDATION_STATUSES = ["matched", "uncertain", "unmatched"] as const;
+export const TEXT_VALIDATION_DIAGNOSIS_KINDS = [
+  "text_overflow",
+  "text_height_drift",
+  "text_position_drift",
+  "text_style_drift",
+  "uncertain",
+] as const;
 
 export type CompareMode = (typeof COMPARE_MODES)[number];
 export type AnalysisMode = (typeof ANALYSIS_MODES)[number];
@@ -124,6 +137,13 @@ export type RootCauseGroupId = (typeof ROOT_CAUSE_GROUP_IDS)[number];
 export type AffectedPropertyCode = (typeof AFFECTED_PROPERTY_CODES)[number];
 export type DecisionTraceMetricKey = (typeof DECISION_TRACE_METRIC_KEYS)[number];
 export type SignalConfidence = (typeof SIGNAL_CONFIDENCES)[number];
+export type CorrespondenceMethod = (typeof CORRESPONDENCE_METHODS)[number];
+export type GeometryShiftLevel = (typeof GEOMETRY_SHIFT_LEVELS)[number];
+export type GeometryDominantDrift = (typeof GEOMETRY_DOMINANT_DRIFTS)[number];
+export type SiblingRelationAxis = (typeof SIBLING_RELATION_AXES)[number];
+export type SiblingRelationDominantDrift = (typeof SIBLING_RELATION_DOMINANT_DRIFTS)[number];
+export type TextValidationStatus = (typeof TEXT_VALIDATION_STATUSES)[number];
+export type TextValidationDiagnosisKind = (typeof TEXT_VALIDATION_DIAGNOSIS_KINDS)[number];
 
 export type Recommendation =
   | "pass"
@@ -219,6 +239,7 @@ export interface ArtifactReport {
   diff: string | null;
   heatmap: string | null;
   report: string;
+  summary: string;
 }
 
 export interface SummaryReport {
@@ -233,6 +254,9 @@ export interface SummaryReport {
   safeToAutofix: boolean;
   requiresRecapture: boolean;
   requiresSanityCheck: boolean;
+  correspondenceCoverage: number | null;
+  correspondenceConfidence: number | null;
+  ambiguousCorrespondences: number | null;
 }
 
 export interface ErrorReport {
@@ -378,6 +402,7 @@ export interface FindingReport {
   id: string;
   rootCauseGroupId: RootCauseGroupId;
   source: FindingSource;
+  granularity?: "group" | "leaf";
   kind: RegionKind;
   code: FindingCode;
   severity: Severity;
@@ -393,6 +418,55 @@ export interface FindingReport {
   signals: FindingSignalReport[];
   element?: FindingElementReport;
   context?: FindingContextReport;
+  matchedReferenceBBox?: BoundingBox;
+  correspondenceMethod?: CorrespondenceMethod;
+  correspondenceConfidence?: number;
+  ambiguity?: number;
+  delta?: {
+    dx: number;
+    dy: number;
+    dw: number;
+    dh: number;
+  };
+  geometry?: GeometryDriftReport;
+  siblingRelation?: SiblingRelationReport;
+  textValidation?: TextValidationReport;
+}
+
+export interface GeometryDriftReport {
+  centerShiftPx: number;
+  normalizedCenterShift: number;
+  widthDeltaPx: number;
+  heightDeltaPx: number;
+  widthDeltaRatio: number;
+  heightDeltaRatio: number;
+  areaDeltaRatio: number;
+  aspectRatioDelta: number;
+  dominantDrift: GeometryDominantDrift;
+  positionShiftLevel: GeometryShiftLevel;
+  sizeShiftLevel: GeometryShiftLevel;
+}
+
+export interface SiblingRelationReport {
+  siblingSelector: string;
+  axis: SiblingRelationAxis;
+  previewGapPx: number;
+  referenceGapPx: number;
+  gapDeltaPx: number;
+  normalizedGapDelta: number;
+  crossAxisOffsetDeltaPx: number;
+  spacingDriftLevel: GeometryShiftLevel;
+  alignmentDriftLevel: GeometryShiftLevel;
+  dominantDrift: SiblingRelationDominantDrift;
+  relativeOrderPreserved: boolean;
+}
+
+export interface TextValidationReport {
+  status: TextValidationStatus;
+  diagnosisKind: TextValidationDiagnosisKind;
+  confidence: number;
+  observations: string[];
+  allowsDirectionalClaim: boolean;
 }
 
 export interface SeverityRollup {

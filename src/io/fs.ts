@@ -1,6 +1,6 @@
 import { access, mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { AppError } from "../utils/errors.js";
+import { AppError, ensureError } from "../utils/errors.js";
 
 interface FilesystemError {
   code?: string;
@@ -52,7 +52,11 @@ export async function ensureFileExists(filePath: string): Promise<string> {
 }
 
 export async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await writeUtf8File(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export async function writeTextFile(filePath: string, value: string): Promise<void> {
+  await writeUtf8File(filePath, value.endsWith("\n") ? value : `${value}\n`);
 }
 
 export async function pathExists(filePath: string): Promise<boolean> {
@@ -61,5 +65,19 @@ export async function pathExists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function writeUtf8File(filePath: string, value: string): Promise<void> {
+  try {
+    await writeFile(filePath, value, "utf8");
+  } catch (error) {
+    throw new AppError(
+      `Failed to write artifact: ${path.resolve(filePath)}. ${ensureError(error).message}`,
+      {
+        code: "artifact_write_failed",
+        cause: error,
+      },
+    );
   }
 }

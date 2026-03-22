@@ -12,6 +12,7 @@
 - `diff.png`: raw pixel diff image
 - `heatmap.png`: mismatch heatmap with highlighted findings
 - `report.json`: compact machine-readable result optimized for agent workflows
+- `summary.md`: compact human-readable summary organized by finding
 
 ## High-Signal Fields
 
@@ -23,6 +24,7 @@ Read these first:
 - `summary.primaryBlockers`
 - `summary.safeToAutofix`
 - `summary.requiresRecapture`
+- `summary.correspondenceCoverage`
 - `error`
 - `findings`
 
@@ -54,6 +56,7 @@ Read these first:
 - `primaryBlockers` groups the dominant causes across visible findings and omitted tail findings
 - `safeToAutofix` helps automation decide whether another fix attempt is reasonable
 - `requiresRecapture` tells the caller to fix setup before changing implementation code
+- `correspondenceCoverage` and `correspondenceConfidence` summarize how many DOM groups were reliably localized on the reference side
 
 ### `metrics`
 
@@ -74,6 +77,9 @@ Read these first:
 - `context.semantic.textLayout` is preserved only for text-related findings
 - `context.semantic.captureClippedEdges` is preserved only when selector capture framing looks clipped
 - `signals` adds stable heuristics such as text clipping, capture crop, or viewport mismatch
+- `matchedReferenceBBox`, `delta`, and `geometry` are available when a DOM finding was reliably localized against the reference
+- `geometry` turns the raw `delta` into normalized position and size drift that is easier for automation to rank
+- `siblingRelation` describes spacing and alignment drift against the nearest reliably localized sibling under the same parent group
 
 ### `rollups`
 

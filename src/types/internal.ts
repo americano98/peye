@@ -128,6 +128,7 @@ export interface CompareArtifacts {
   diff: string;
   heatmap: string;
   report: string;
+  summary: string;
 }
 
 export interface ComparisonRegion {

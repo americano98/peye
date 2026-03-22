@@ -83,6 +83,7 @@ Each run writes a deterministic output bundle:
 - `overlay.png`: blended reference plus preview image
 - `diff.png`: raw pixel diff image
 - `heatmap.png`: highlighted mismatch regions
+- `summary.md`: compact human-readable explanation of the main findings
 
 For automation, the most important fields are:
 
