@@ -1,7 +1,12 @@
+import { buildGeometryDrift } from "../src/analysis/geometry.js";
 import { buildFindingsAnalysis } from "../src/analysis/findings.js";
+import { buildMarkdownTextReport } from "../src/analysis/text-report.js";
+import { buildTextValidation } from "../src/analysis/text-validation.js";
+import { buildSiblingRelationsIndex } from "../src/analysis/relations.js";
 import { describe, expect, test } from "vitest";
 import { decideRecommendation } from "../src/analysis/recommendation.js";
 import { buildSummaryReport } from "../src/analysis/summary.js";
+import type { GroupLocalization, GroupNode } from "../src/correspond/types.js";
 import { parseReferenceInput } from "../src/io/inputs.js";
 import type {
   ComparisonRegion,
@@ -95,6 +100,21 @@ function createFinding(
     signals,
     ...(element ? { element } : {}),
     ...(overrides.context ? { context: overrides.context } : {}),
+    ...(overrides.granularity ? { granularity: overrides.granularity } : {}),
+    ...(overrides.matchedReferenceBBox
+      ? { matchedReferenceBBox: overrides.matchedReferenceBBox }
+      : {}),
+    ...(overrides.correspondenceMethod
+      ? { correspondenceMethod: overrides.correspondenceMethod }
+      : {}),
+    ...(overrides.correspondenceConfidence !== undefined
+      ? { correspondenceConfidence: overrides.correspondenceConfidence }
+      : {}),
+    ...(overrides.ambiguity !== undefined ? { ambiguity: overrides.ambiguity } : {}),
+    ...(overrides.delta ? { delta: overrides.delta } : {}),
+    ...(overrides.geometry ? { geometry: overrides.geometry } : {}),
+    ...(overrides.siblingRelation ? { siblingRelation: overrides.siblingRelation } : {}),
+    ...(overrides.textValidation ? { textValidation: overrides.textValidation } : {}),
   };
 }
 
@@ -303,6 +323,244 @@ describe("decideRecommendation", () => {
       "fixability_localized_actionable",
       "final_retry_fix",
     ]);
+  });
+
+  test("treats strong text overflow findings as localized actionable text evidence", () => {
+    const decision = decideRecommendation({
+      thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
+      metrics: createMetrics({
+        mismatchPixels: 320,
+        mismatchPercent: 3.2,
+        meanColorDelta: 4,
+        maxColorDelta: 6,
+        structuralMismatchPercent: 2,
+      }),
+      findings: [
+        createFinding({
+          kind: "pixel",
+          severity: "medium",
+          code: "text_clipping",
+          element: {
+            selector: "section#hero > h2.title",
+            tag: "h2",
+            textSnippet: "Built for practical LLM training",
+          },
+          textValidation: {
+            status: "matched",
+            diagnosisKind: "text_overflow",
+            confidence: 0.9,
+            observations: ["Preview text overflows vertically.", "Preview text spans 2 line(s)."],
+            allowsDirectionalClaim: true,
+          },
+          signals: [
+            {
+              code: "probable_text_clipping",
+              confidence: "high",
+              message: "Text content likely overflows the element bounds.",
+            },
+          ],
+        }),
+        createFinding({
+          kind: "mixed",
+          severity: "medium",
+          code: "layout_style_mismatch",
+          element: {
+            selector: "section#hero > header",
+            tag: "header",
+          },
+        }),
+      ],
+    });
+
+    expect(decision.recommendation).toBe("retry_fix");
+    expect(decision.decisionTrace.map((trace) => trace.code)).toEqual([
+      "layout_localized_drift",
+      "pixel_retry_range",
+      "fixability_localized_actionable",
+      "final_retry_fix",
+    ]);
+    expect(decision.reason).toContain("text blocks");
+  });
+
+  test("reduces setup-signal dominance when multiple strong text findings are localized", () => {
+    const findings = [
+      createFinding({
+        id: "finding-text-a",
+        kind: "pixel",
+        severity: "medium",
+        code: "text_clipping",
+        element: {
+          selector: "section#hero > h2.title",
+          tag: "h2",
+          textSnippet: "Built for practical LLM training",
+        },
+        textValidation: {
+          status: "matched",
+          diagnosisKind: "text_overflow",
+          confidence: 0.9,
+          observations: ["Preview text overflows vertically."],
+          allowsDirectionalClaim: true,
+        },
+        signals: [
+          {
+            code: "probable_text_clipping",
+            confidence: "high",
+            message: "Text content likely overflows the element bounds.",
+          },
+        ],
+      }),
+      createFinding({
+        id: "finding-text-b",
+        kind: "color",
+        severity: "medium",
+        code: "style_mismatch",
+        element: {
+          selector: "section#hero > p.body",
+          tag: "p",
+          textSnippet: "Accelerate LLM training while maximizing GPU efficiency.",
+        },
+        textValidation: {
+          status: "matched",
+          diagnosisKind: "text_style_drift",
+          confidence: 0.84,
+          observations: [
+            "Matched text block shape is broadly consistent, but typography may differ.",
+          ],
+          allowsDirectionalClaim: false,
+        },
+      }),
+      createFinding({
+        id: "finding-viewport",
+        kind: "dimension",
+        severity: "medium",
+        code: "viewport_mismatch",
+        source: "visual-cluster",
+        signals: [
+          {
+            code: "possible_viewport_mismatch",
+            confidence: "high",
+            message: "Viewport mismatch detected.",
+          },
+        ],
+        element: null,
+      }),
+    ];
+    const decision = decideRecommendation({
+      thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
+      metrics: createMetrics({
+        mismatchPixels: 340,
+        mismatchPercent: 3.4,
+        meanColorDelta: 5,
+        maxColorDelta: 7,
+        structuralMismatchPercent: 1,
+      }),
+      findings,
+    });
+    const summary = buildSummaryReport({
+      baseDecision: decision,
+      findings,
+      fullFindings: findings,
+      analysisMode: "dom-elements",
+      omittedFindings: 0,
+      error: null,
+      correspondenceSummary: null,
+    });
+
+    expect(decision.reason).not.toContain("sanity check");
+    expect(summary.agentChecks).toEqual([]);
+    expect(summary.topActions[0]?.code).toBe("fix_text_overflow");
+  });
+
+  test("treats strong geometry drift as localized layout evidence even when structural mismatch is low", () => {
+    const decision = decideRecommendation({
+      thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
+      metrics: createMetrics({
+        mismatchPixels: 320,
+        mismatchPercent: 3.2,
+        meanColorDelta: 3,
+        maxColorDelta: 4,
+        structuralMismatchPercent: 0,
+      }),
+      findings: [
+        createFinding({
+          kind: "color",
+          severity: "medium",
+          code: "style_mismatch",
+          element: {
+            selector: "#cta",
+            tag: "button",
+          },
+          geometry: {
+            centerShiftPx: 18,
+            normalizedCenterShift: 0.22,
+            widthDeltaPx: 12,
+            heightDeltaPx: 0,
+            widthDeltaRatio: 0.18,
+            heightDeltaRatio: 0,
+            areaDeltaRatio: 0.18,
+            aspectRatioDelta: 0.14,
+            dominantDrift: "mixed",
+            positionShiftLevel: "large",
+            sizeShiftLevel: "large",
+          },
+        }),
+      ],
+    });
+
+    expect(decision.recommendation).toBe("retry_fix");
+    expect(decision.decisionTrace.map((trace) => trace.code)).toEqual([
+      "layout_localized_drift",
+      "pixel_retry_range",
+      "fixability_localized_actionable",
+      "final_retry_fix",
+    ]);
+    expect(decision.decisionTrace[0]?.reason).toContain("Position or size drift");
+  });
+
+  test("treats sibling spacing drift as localized layout evidence", () => {
+    const decision = decideRecommendation({
+      thresholds: { pass: 0.5, tolerated: 1.5, retry: 5 },
+      metrics: createMetrics({
+        mismatchPixels: 360,
+        mismatchPercent: 3.6,
+        meanColorDelta: 2,
+        maxColorDelta: 3,
+        structuralMismatchPercent: 0,
+      }),
+      findings: [
+        createFinding({
+          kind: "pixel",
+          severity: "medium",
+          code: "rendering_mismatch",
+          element: {
+            selector: "#feature-a",
+            tag: "div",
+          },
+          siblingRelation: {
+            siblingSelector: "#feature-b",
+            axis: "horizontal",
+            previewGapPx: 24,
+            referenceGapPx: 42,
+            gapDeltaPx: 18,
+            normalizedGapDelta: 0.3,
+            crossAxisOffsetDeltaPx: 2,
+            spacingDriftLevel: "medium",
+            alignmentDriftLevel: "small",
+            dominantDrift: "spacing",
+            relativeOrderPreserved: true,
+          },
+        }),
+      ],
+    });
+
+    expect(decision.recommendation).toBe("retry_fix");
+    expect(decision.decisionTrace.map((trace) => trace.code)).toEqual([
+      "layout_localized_drift",
+      "pixel_retry_range",
+      "fixability_localized_actionable",
+      "final_retry_fix",
+    ]);
+    expect(decision.decisionTrace[0]?.reason).toContain("Spacing or alignment drift");
   });
 
   test("returns needs human review for strong dimension mismatch", () => {
@@ -749,6 +1007,295 @@ function createDomSnapshotForTest(
   };
 }
 
+describe("buildGeometryDrift", () => {
+  test("computes normalized position and size drift from matched boxes", () => {
+    const geometry = buildGeometryDrift(
+      {
+        x: 10,
+        y: 20,
+        width: 100,
+        height: 40,
+      },
+      {
+        x: 22,
+        y: 20,
+        width: 120,
+        height: 40,
+      },
+    );
+
+    expect(geometry).toEqual(
+      expect.objectContaining({
+        centerShiftPx: 22,
+        widthDeltaPx: 20,
+        heightDeltaPx: 0,
+        widthDeltaRatio: 0.2,
+        dominantDrift: "mixed",
+        positionShiftLevel: "large",
+        sizeShiftLevel: "large",
+      }),
+    );
+  });
+});
+
+describe("buildTextValidation", () => {
+  test("returns text_overflow for a significant matched text node with vertical overflow", () => {
+    const textValidation = buildTextValidation({
+      element: {
+        tag: "h2",
+        textSnippet: "Built for practical LLM training",
+        bbox: {
+          width: 429,
+          height: 112,
+        },
+      },
+      context: {
+        semantic: {
+          computedStyle: {
+            fontSize: "56px",
+            lineHeight: "56px",
+            fontWeight: "500",
+            color: "rgb(13, 13, 12)",
+            backgroundColor: "rgba(0, 0, 0, 0)",
+            borderRadius: "0px",
+            gap: "0px",
+            padding: "0px",
+            width: "429px",
+            height: "112px",
+            margin: "0px",
+          },
+          textLayout: {
+            lineCount: 2,
+            wrapState: "overflowing" as const,
+            hasEllipsis: false,
+            lineClamp: "none",
+            overflowsX: false,
+            overflowsY: true,
+          },
+        },
+      },
+      correspondence: {
+        groupId: "heading",
+        attempted: true,
+        found: true,
+        reliable: true,
+        method: "template",
+        confidence: 0.88,
+        ambiguity: 0.12,
+        matchedReferenceBBox: {
+          x: 384,
+          y: 205,
+          width: 429,
+          height: 112,
+        },
+        delta: {
+          dx: 0,
+          dy: 5,
+          dw: 0,
+          dh: 0,
+        },
+        scores: {
+          thumbnail: 0.88,
+          edge: 0.81,
+          ssim: 0.82,
+          geometry: 0.8,
+          structural: 0.8,
+        },
+      },
+      geometry: {
+        centerShiftPx: 5,
+        normalizedCenterShift: 0.0113,
+        widthDeltaPx: 0,
+        heightDeltaPx: 0,
+        widthDeltaRatio: 0,
+        heightDeltaRatio: 0,
+        areaDeltaRatio: 0,
+        aspectRatioDelta: 0,
+        dominantDrift: "none",
+        positionShiftLevel: "small",
+        sizeShiftLevel: "none",
+      },
+      siblingRelation: undefined,
+      signals: [],
+    });
+
+    expect(textValidation).toEqual(
+      expect.objectContaining({
+        status: "matched",
+        diagnosisKind: "text_overflow",
+        allowsDirectionalClaim: true,
+      }),
+    );
+    expect(textValidation?.observations).toEqual(
+      expect.arrayContaining([
+        "Preview text overflows vertically.",
+        "Preview text spans 2 line(s).",
+      ]),
+    );
+  });
+});
+
+describe("buildSiblingRelationsIndex", () => {
+  test("computes spacing and alignment drift against a localized sibling", () => {
+    const rootSnapshot = createDomSnapshotForTest();
+    const left = rootSnapshot.elements[0]!;
+    const right = {
+      ...left,
+      id: "cta-secondary",
+      selector: "section#hero > button#cta-secondary",
+      testId: "hero-cta-secondary",
+      bbox: {
+        x: 60,
+        y: 10,
+        width: 40,
+        height: 18,
+      },
+      locator: {
+        ...left.locator,
+        selector: "section#hero > button#cta-secondary",
+        testId: "hero-cta-secondary",
+      },
+      identity: {
+        ...left.identity,
+        testId: "hero-cta-secondary",
+      },
+      overlapHints: {
+        ...left.overlapHints,
+        topMostAtCenter: "section#hero > button#cta-secondary",
+      },
+      anchorElementId: "cta-secondary",
+    };
+    const parentGroup: GroupNode = {
+      id: rootSnapshot.root.id,
+      selector: rootSnapshot.root.selector,
+      representativeElementId: rootSnapshot.root.id,
+      representativeElement: rootSnapshot.root,
+      bbox: rootSnapshot.root.bbox,
+      area: rootSnapshot.root.bbox.width * rootSnapshot.root.bbox.height,
+      depth: rootSnapshot.root.depth,
+      memberElementIds: [rootSnapshot.root.id],
+      parentGroupId: null,
+      childGroupIds: [left.id, right.id],
+      mismatchWeight: 0,
+      traits: {
+        hasOwnText: false,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: true,
+      },
+    };
+    const leftGroup: GroupNode = {
+      id: left.id,
+      selector: left.selector,
+      representativeElementId: left.id,
+      representativeElement: left,
+      bbox: left.bbox,
+      area: left.bbox.width * left.bbox.height,
+      depth: left.depth,
+      memberElementIds: [left.id],
+      parentGroupId: parentGroup.id,
+      childGroupIds: [],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: Boolean(left.textSnippet),
+        hasTextDescendant: Boolean(left.textSnippet),
+        isInteractive: true,
+        hasPaintedBox: true,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const rightGroup: GroupNode = {
+      ...leftGroup,
+      id: right.id,
+      selector: right.selector,
+      representativeElementId: right.id,
+      representativeElement: right,
+      bbox: right.bbox,
+      area: right.bbox.width * right.bbox.height,
+      memberElementIds: [right.id],
+      mismatchWeight: 0.8,
+    };
+    const localizations = new Map<string, GroupLocalization>([
+      [
+        left.id,
+        {
+          groupId: left.id,
+          attempted: true,
+          found: true,
+          reliable: true,
+          method: "template",
+          confidence: 0.88,
+          ambiguity: 0.06,
+          matchedReferenceBBox: {
+            x: 10,
+            y: 10,
+            width: 40,
+            height: 18,
+          },
+          delta: { dx: 0, dy: 0, dw: 0, dh: 0 },
+          scores: {
+            thumbnail: 0.88,
+            edge: 0.81,
+            ssim: 0.83,
+            geometry: 0.8,
+            structural: 0.82,
+          },
+        },
+      ],
+      [
+        right.id,
+        {
+          groupId: right.id,
+          attempted: true,
+          found: true,
+          reliable: true,
+          method: "template",
+          confidence: 0.86,
+          ambiguity: 0.08,
+          matchedReferenceBBox: {
+            x: 82,
+            y: 14,
+            width: 40,
+            height: 18,
+          },
+          delta: { dx: 22, dy: 4, dw: 0, dh: 0 },
+          scores: {
+            thumbnail: 0.86,
+            edge: 0.8,
+            ssim: 0.81,
+            geometry: 0.79,
+            structural: 0.8,
+          },
+        },
+      ],
+    ]);
+    const relations = buildSiblingRelationsIndex(
+      new Map([
+        [parentGroup.id, parentGroup],
+        [leftGroup.id, leftGroup],
+        [rightGroup.id, rightGroup],
+      ]),
+      localizations,
+    );
+
+    expect(relations.get(left.id)).toEqual(
+      expect.objectContaining({
+        siblingSelector: right.selector,
+        axis: "horizontal",
+        gapDeltaPx: 20,
+        crossAxisOffsetDeltaPx: 2,
+        spacingDriftLevel: "medium",
+        alignmentDriftLevel: "small",
+        dominantDrift: "spacing",
+        relativeOrderPreserved: true,
+      }),
+    );
+  });
+});
+
 describe("buildFindingsAnalysis", () => {
   test("omits context for visual-cluster findings", () => {
     const analysis = buildFindingsAnalysis({
@@ -853,11 +1400,13 @@ describe("buildFindingsAnalysis", () => {
     expect(analysis.findings[0]?.context?.semantic?.textLayout).toEqual(
       expect.objectContaining({
         lineCount: 1,
-        wrapState: "single-line",
+        wrapState: "single-line" as const,
         hasEllipsis: false,
       }),
     );
     expect(analysis.findings[0]?.context?.semantic?.captureClippedEdges).toEqual(["right"]);
+    expect(analysis.findings[0]?.summary).toContain("text appears clipped");
+    expect(analysis.findings[0]?.fixHint).toContain("overflow");
   });
 
   test("emits center-hit binding diagnostics for strong anchor matches", () => {
@@ -964,6 +1513,1141 @@ describe("buildFindingsAnalysis", () => {
       }),
     );
     expect(analysis.findings[0]?.context?.binding.assignmentConfidence).toBeLessThan(0.7);
+  });
+
+  test("adds geometry drift to localized DOM findings and upgrades layout classification", () => {
+    const domSnapshot = createDomSnapshotForTest();
+    const anchor = domSnapshot.elements[0]!;
+    const group: GroupNode = {
+      id: anchor.id,
+      selector: anchor.selector,
+      representativeElementId: anchor.id,
+      representativeElement: anchor,
+      bbox: anchor.bbox,
+      area: anchor.bbox.width * anchor.bbox.height,
+      depth: anchor.depth,
+      memberElementIds: [anchor.id],
+      parentGroupId: null,
+      childGroupIds: [],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: Boolean(anchor.textSnippet),
+        hasTextDescendant: Boolean(anchor.textSnippet),
+        isInteractive: anchor.interactivity.isInteractive,
+        hasPaintedBox: true,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const localization: GroupLocalization = {
+      groupId: group.id,
+      attempted: true,
+      found: true,
+      reliable: true,
+      method: "template",
+      confidence: 0.84,
+      ambiguity: 0.08,
+      matchedReferenceBBox: {
+        x: anchor.bbox.x + 12,
+        y: anchor.bbox.y,
+        width: anchor.bbox.width + 20,
+        height: anchor.bbox.height,
+      },
+      delta: {
+        dx: 12,
+        dy: 0,
+        dw: 20,
+        dh: 0,
+      },
+      scores: {
+        thumbnail: 0.84,
+        edge: 0.79,
+        ssim: 0.8,
+        geometry: 0.78,
+        structural: 0.76,
+      },
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({ x: 10, y: 10, width: 12, height: 8, pixelCount: 96, kind: "pixel" }),
+      ],
+      domSnapshot,
+      groupsById: new Map([[group.id, group]]),
+      elementToGroupId: new Map([[anchor.id, group.id]]),
+      localizationsByGroupId: new Map([[group.id, localization]]),
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.code).toBe("layout_mismatch");
+    expect(analysis.findings[0]?.geometry).toEqual(
+      expect.objectContaining({
+        widthDeltaPx: 20,
+        positionShiftLevel: "large",
+        sizeShiftLevel: "large",
+        dominantDrift: "mixed",
+      }),
+    );
+    expect(analysis.findings[0]?.likelyAffectedProperties).toEqual(
+      expect.arrayContaining(["layout.position", "layout.alignment", "size.width"]),
+    );
+    expect(analysis.findings[0]?.issueTypes).toEqual(expect.arrayContaining(["position", "size"]));
+    expect(analysis.findings[0]?.summary).toContain("matched reference area in position and size");
+    expect(analysis.findings[0]?.fixHint).toContain("matched element against the reference");
+  });
+
+  test("adds sibling relation drift to localized DOM findings", () => {
+    const domSnapshot = createDomSnapshotForTest();
+    const anchor = domSnapshot.elements[0]!;
+    const sibling = {
+      ...anchor,
+      id: "cta-secondary",
+      selector: "section#hero > button#cta-secondary",
+      testId: "hero-cta-secondary",
+      bbox: {
+        x: 60,
+        y: 10,
+        width: 40,
+        height: 18,
+      },
+      locator: {
+        ...anchor.locator,
+        selector: "section#hero > button#cta-secondary",
+        testId: "hero-cta-secondary",
+      },
+      identity: {
+        ...anchor.identity,
+        testId: "hero-cta-secondary",
+      },
+      overlapHints: {
+        ...anchor.overlapHints,
+        topMostAtCenter: "section#hero > button#cta-secondary",
+      },
+      anchorElementId: "cta-secondary",
+    };
+    const parentGroup: GroupNode = {
+      id: domSnapshot.root.id,
+      selector: domSnapshot.root.selector,
+      representativeElementId: domSnapshot.root.id,
+      representativeElement: domSnapshot.root,
+      bbox: domSnapshot.root.bbox,
+      area: domSnapshot.root.bbox.width * domSnapshot.root.bbox.height,
+      depth: domSnapshot.root.depth,
+      memberElementIds: [domSnapshot.root.id],
+      parentGroupId: null,
+      childGroupIds: [anchor.id, sibling.id],
+      mismatchWeight: 0,
+      traits: {
+        hasOwnText: false,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: true,
+      },
+    };
+    const anchorGroup: GroupNode = {
+      id: anchor.id,
+      selector: anchor.selector,
+      representativeElementId: anchor.id,
+      representativeElement: anchor,
+      bbox: anchor.bbox,
+      area: anchor.bbox.width * anchor.bbox.height,
+      depth: anchor.depth,
+      memberElementIds: [anchor.id],
+      parentGroupId: parentGroup.id,
+      childGroupIds: [],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: Boolean(anchor.textSnippet),
+        hasTextDescendant: Boolean(anchor.textSnippet),
+        isInteractive: anchor.interactivity.isInteractive,
+        hasPaintedBox: true,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const siblingGroup: GroupNode = {
+      ...anchorGroup,
+      id: sibling.id,
+      selector: sibling.selector,
+      representativeElementId: sibling.id,
+      representativeElement: sibling,
+      bbox: sibling.bbox,
+      area: sibling.bbox.width * sibling.bbox.height,
+      memberElementIds: [sibling.id],
+      mismatchWeight: 0.8,
+    };
+    const localizations = new Map<string, GroupLocalization>([
+      [
+        anchor.id,
+        {
+          groupId: anchor.id,
+          attempted: true,
+          found: true,
+          reliable: true,
+          method: "template",
+          confidence: 0.88,
+          ambiguity: 0.06,
+          matchedReferenceBBox: {
+            x: 10,
+            y: 10,
+            width: 40,
+            height: 18,
+          },
+          delta: { dx: 0, dy: 0, dw: 0, dh: 0 },
+          scores: {
+            thumbnail: 0.88,
+            edge: 0.81,
+            ssim: 0.83,
+            geometry: 0.8,
+            structural: 0.82,
+          },
+        },
+      ],
+      [
+        sibling.id,
+        {
+          groupId: sibling.id,
+          attempted: true,
+          found: true,
+          reliable: true,
+          method: "template",
+          confidence: 0.86,
+          ambiguity: 0.08,
+          matchedReferenceBBox: {
+            x: 82,
+            y: 14,
+            width: 40,
+            height: 18,
+          },
+          delta: { dx: 22, dy: 4, dw: 0, dh: 0 },
+          scores: {
+            thumbnail: 0.86,
+            edge: 0.8,
+            ssim: 0.81,
+            geometry: 0.79,
+            structural: 0.8,
+          },
+        },
+      ],
+    ]);
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({ x: 10, y: 10, width: 12, height: 8, pixelCount: 96, kind: "pixel" }),
+      ],
+      domSnapshot: {
+        ...domSnapshot,
+        elements: [anchor, sibling],
+        bindingCandidates: [anchor, sibling],
+      },
+      groupsById: new Map([
+        [parentGroup.id, parentGroup],
+        [anchorGroup.id, anchorGroup],
+        [siblingGroup.id, siblingGroup],
+      ]),
+      elementToGroupId: new Map([
+        [anchor.id, anchor.id],
+        [sibling.id, sibling.id],
+      ]),
+      localizationsByGroupId: localizations,
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.siblingRelation).toEqual(
+      expect.objectContaining({
+        axis: "horizontal",
+        spacingDriftLevel: "medium",
+        alignmentDriftLevel: "small",
+        dominantDrift: "spacing",
+      }),
+    );
+    expect(analysis.findings[0]?.likelyAffectedProperties).toEqual(
+      expect.arrayContaining(["layout.spacing", "layout.alignment", "layout.position"]),
+    );
+    expect(analysis.findings[0]?.issueTypes).toEqual(
+      expect.arrayContaining(["spacing", "position"]),
+    );
+    expect(analysis.findings[0]?.summary).toContain("spacing relative to a nearby sibling");
+    expect(analysis.findings[0]?.fixHint).toContain("gap or spacing");
+  });
+
+  test("describes unmatched overflowing content without overclaiming the cause", () => {
+    const domSnapshot = createDomSnapshotForTest({
+      tag: "header",
+      selector: "section#hero > header",
+      textSnippet: "A long heading",
+      computedStyle: {
+        fontSize: "16px",
+        lineHeight: "24px",
+        fontWeight: "400",
+        color: "rgb(0, 0, 0)",
+        backgroundColor: "rgba(0, 0, 0, 0)",
+        borderRadius: "0px",
+        gap: "24px",
+        padding: "0px",
+        width: "1024px",
+        height: "162px",
+        margin: "0px",
+      },
+      textLayout: {
+        lineCount: 6,
+        wrapState: "overflowing" as const,
+        hasEllipsis: false,
+        lineClamp: "none",
+        overflowsX: true,
+        overflowsY: true,
+      },
+    });
+    const anchor = domSnapshot.elements[0]!;
+    const group: GroupNode = {
+      id: anchor.id,
+      selector: anchor.selector,
+      representativeElementId: anchor.id,
+      representativeElement: anchor,
+      bbox: anchor.bbox,
+      area: anchor.bbox.width * anchor.bbox.height,
+      depth: anchor.depth,
+      memberElementIds: [anchor.id],
+      parentGroupId: null,
+      childGroupIds: [],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: true,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({ x: 10, y: 10, width: 12, height: 8, pixelCount: 96, kind: "pixel" }),
+      ],
+      domSnapshot,
+      groupsById: new Map([[group.id, group]]),
+      elementToGroupId: new Map([[anchor.id, group.id]]),
+      localizationsByGroupId: new Map([
+        [
+          group.id,
+          {
+            groupId: group.id,
+            attempted: true,
+            found: false,
+            reliable: false,
+            method: "none",
+            confidence: 0,
+            ambiguity: 1,
+            scores: {
+              thumbnail: 0,
+              edge: 0,
+              ssim: 0,
+              geometry: 0,
+              structural: 0,
+            },
+          },
+        ],
+      ]),
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.code).toBe("text_clipping");
+    expect(analysis.findings[0]?.summary).toContain("text appears clipped");
+    expect(analysis.findings[0]?.summary).toContain("overflows its current 1024px x 162px box");
+    expect(analysis.findings[0]?.fixHint).toContain("line-height");
+  });
+
+  test("describes vertical offset when geometry shift is reliable and size is unchanged", () => {
+    const domSnapshot = createDomSnapshotForTest();
+    const anchor = domSnapshot.elements[0]!;
+    const group: GroupNode = {
+      id: anchor.id,
+      selector: anchor.selector,
+      representativeElementId: anchor.id,
+      representativeElement: anchor,
+      bbox: anchor.bbox,
+      area: anchor.bbox.width * anchor.bbox.height,
+      depth: anchor.depth,
+      memberElementIds: [anchor.id],
+      parentGroupId: null,
+      childGroupIds: [],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: true,
+        hasTextDescendant: true,
+        isInteractive: true,
+        hasPaintedBox: true,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({ x: 10, y: 10, width: 12, height: 8, pixelCount: 96, kind: "layout" }),
+      ],
+      domSnapshot,
+      groupsById: new Map([[group.id, group]]),
+      elementToGroupId: new Map([[anchor.id, group.id]]),
+      localizationsByGroupId: new Map([
+        [
+          group.id,
+          {
+            groupId: group.id,
+            attempted: true,
+            found: true,
+            reliable: true,
+            method: "template",
+            confidence: 0.9,
+            ambiguity: 0.08,
+            matchedReferenceBBox: {
+              x: anchor.bbox.x,
+              y: anchor.bbox.y - 16,
+              width: anchor.bbox.width,
+              height: anchor.bbox.height,
+            },
+            delta: {
+              dx: 0,
+              dy: -16,
+              dw: 0,
+              dh: 0,
+            },
+            scores: {
+              thumbnail: 0.9,
+              edge: 0.84,
+              ssim: 0.83,
+              geometry: 0.85,
+              structural: 0.84,
+            },
+          },
+        ],
+      ]),
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings[0]?.summary).toContain("vertically offset");
+    expect(analysis.findings[0]?.summary).toContain("16px");
+    expect(analysis.findings[0]?.fixHint).toContain("top/bottom spacing");
+  });
+
+  test("markdown summary avoids precise directional geometry claims for moderate-confidence matches", () => {
+    const finding = createFinding({
+      kind: "mixed",
+      severity: "medium",
+      code: "layout_style_mismatch",
+      summary:
+        "Element <header> differs from the matched reference area in position and visual styling differs.",
+      fixHint:
+        "Check the matched element against the reference before making a more specific layout change Then reconcile colors, fills, borders, or shadows.",
+      element: {
+        tag: "header",
+        selector: "section#hero > header",
+      },
+      correspondenceMethod: "template",
+      correspondenceConfidence: 0.7442,
+      ambiguity: 0.1778,
+      delta: {
+        dx: -60,
+        dy: 5,
+        dw: 0,
+        dh: 0,
+      },
+      geometry: {
+        centerShiftPx: 60.208,
+        normalizedCenterShift: 0.0518,
+        widthDeltaPx: 0,
+        heightDeltaPx: 0,
+        widthDeltaRatio: 0,
+        heightDeltaRatio: 0,
+        areaDeltaRatio: 0,
+        aspectRatioDelta: 0,
+        dominantDrift: "position",
+        positionShiftLevel: "large",
+        sizeShiftLevel: "none",
+      },
+      context: {
+        binding: {
+          assignmentMethod: "center-hit",
+          assignmentConfidence: 0.99,
+        },
+        semantic: {
+          computedStyle: {
+            fontSize: "16px",
+            lineHeight: "24px",
+            fontWeight: "400",
+            color: "rgb(13, 13, 12)",
+            backgroundColor: "rgba(0, 0, 0, 0)",
+            borderRadius: "0px",
+            gap: "307px",
+            padding: "0px",
+            width: "1152px",
+            height: "162px",
+            margin: "0px",
+          },
+        },
+      },
+      likelyAffectedProperties: [
+        "layout.position",
+        "layout.spacing",
+        "style.color",
+        "style.background",
+      ],
+    });
+    const report = {
+      analysisMode: "dom-elements" as const,
+      summary: {
+        recommendation: "retry_fix" as const,
+        severity: "high" as const,
+        reason: "Test reason",
+        decisionTrace: [],
+        topActions: [],
+        agentChecks: [],
+        primaryBlockers: [],
+        overallConfidence: 0.8,
+        safeToAutofix: false,
+        requiresRecapture: false,
+        requiresSanityCheck: false,
+        correspondenceCoverage: 0.8,
+        correspondenceConfidence: 0.74,
+        ambiguousCorrespondences: 1,
+      },
+      inputs: {
+        preview: {
+          input: "",
+          kind: "url" as const,
+          resolved: "",
+          selector: null,
+          ignoreSelectors: [],
+        },
+        reference: {
+          input: "",
+          kind: "figma-url" as const,
+          resolved: "",
+          selector: null,
+          transport: "figma-rest" as const,
+        },
+        viewport: { width: 1920, height: 1115 },
+        mode: "all" as const,
+        fullPage: false,
+      },
+      images: {
+        preview: { width: 1920, height: 1115 },
+        reference: { width: 1920, height: 1114 },
+        canvas: { width: 1920, height: 1115 },
+      },
+      metrics: createMetrics({
+        mismatchPixels: 10,
+        mismatchPercent: 1,
+        findingsCount: 1,
+        affectedElementCount: 1,
+      }),
+      rollups: {
+        bySeverity: [],
+        byKind: [],
+        byTag: [],
+        rawRegionCount: 1,
+        findingsCount: 1,
+        affectedElementCount: 1,
+        omittedFindings: 0,
+        omittedBySeverity: [],
+        omittedByKind: [],
+        topOmittedSelectors: [],
+        largestOmittedRegions: [],
+        tailAreaPercent: 0,
+      },
+      findings: [finding],
+      artifacts: {
+        preview: "",
+        reference: "",
+        overlay: "",
+        diff: "",
+        heatmap: "",
+        report: "",
+        summary: "",
+      },
+      error: null,
+    };
+
+    const markdown = buildMarkdownTextReport(report);
+    expect(markdown).toContain("matched element differs from the reference area");
+    expect(markdown).not.toContain("horizontally offset by about 60px");
+  });
+
+  test("uses text-specific diagnosis for matched overflowing heading blocks", () => {
+    const domSnapshot = createDomSnapshotForTest({
+      tag: "h2",
+      selector: "section#hero > h2.title",
+      textSnippet: "Built for practical LLM training",
+      bbox: { x: 40, y: 76, width: 429, height: 112 },
+      computedStyle: {
+        fontSize: "56px",
+        lineHeight: "56px",
+        fontWeight: "500",
+        color: "rgb(13, 13, 12)",
+        backgroundColor: "rgba(0, 0, 0, 0)",
+        borderRadius: "0px",
+        gap: "0px",
+        padding: "0px",
+        width: "429px",
+        height: "112px",
+        margin: "0px",
+      },
+      textLayout: {
+        lineCount: 2,
+        wrapState: "overflowing" as const,
+        hasEllipsis: false,
+        lineClamp: "none",
+        overflowsX: false,
+        overflowsY: true,
+      },
+    });
+    const anchor = domSnapshot.elements[0]!;
+    const group: GroupNode = {
+      id: anchor.id,
+      selector: anchor.selector,
+      representativeElementId: anchor.id,
+      representativeElement: anchor,
+      bbox: anchor.bbox,
+      area: anchor.bbox.width * anchor.bbox.height,
+      depth: anchor.depth,
+      memberElementIds: [anchor.id],
+      parentGroupId: null,
+      childGroupIds: [],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: true,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({
+          x: 40,
+          y: 76,
+          width: 80,
+          height: 24,
+          pixelCount: 1920,
+          kind: "pixel",
+          severity: "medium",
+        }),
+      ],
+      domSnapshot,
+      groupsById: new Map([[group.id, group]]),
+      elementToGroupId: new Map([[anchor.id, group.id]]),
+      localizationsByGroupId: new Map([
+        [
+          group.id,
+          {
+            groupId: group.id,
+            attempted: true,
+            found: true,
+            reliable: true,
+            method: "template",
+            confidence: 0.88,
+            ambiguity: 0.12,
+            matchedReferenceBBox: { x: 40, y: 71, width: 429, height: 112 },
+            delta: { dx: 0, dy: -5, dw: 0, dh: 0 },
+            scores: { thumbnail: 0.88, edge: 0.82, ssim: 0.81, geometry: 0.8, structural: 0.81 },
+          },
+        ],
+      ]),
+      width: 640,
+      height: 320,
+    });
+
+    expect(analysis.findings[0]?.code).toBe("text_clipping");
+    expect(analysis.findings[0]?.textValidation).toEqual(
+      expect.objectContaining({
+        status: "matched",
+        diagnosisKind: "text_overflow",
+      }),
+    );
+    expect(analysis.findings[0]?.summary).toContain("text appears clipped");
+    expect(analysis.findings[0]?.fixHint).toContain("line-height");
+    expect(analysis.findings[0]?.likelyAffectedProperties).toEqual(
+      expect.arrayContaining(["text.overflow", "text.lineClamp", "style.typography"]),
+    );
+  });
+
+  test("keeps significant child text findings alongside a parent container finding", () => {
+    const base = createDomSnapshotForTest();
+    const header = {
+      ...base.elements[0]!,
+      id: "header",
+      tag: "header",
+      selector: "section#hero > header",
+      textSnippet: "Heading body text",
+      bbox: { x: 20, y: 20, width: 460, height: 180 },
+      locator: { ...base.elements[0]!.locator, tag: "header", selector: "section#hero > header" },
+      identity: { ...base.elements[0]!.identity, semanticTag: "header" },
+      anchorElementId: "header",
+    };
+    const title = {
+      ...base.elements[0]!,
+      id: "title",
+      tag: "h2",
+      selector: "section#hero > header > h2.title",
+      textSnippet: "Built for practical LLM training",
+      bbox: { x: 20, y: 52, width: 429, height: 112 },
+      ancestry: [header.locator, base.root.locator],
+      locator: {
+        ...base.elements[0]!.locator,
+        tag: "h2",
+        selector: "section#hero > header > h2.title",
+      },
+      identity: { ...base.elements[0]!.identity, semanticTag: "h2" },
+      anchorElementId: "title",
+      computedStyle: {
+        fontSize: "56px",
+        lineHeight: "56px",
+        fontWeight: "500",
+        color: "rgb(13, 13, 12)",
+        backgroundColor: "rgba(0, 0, 0, 0)",
+        borderRadius: "0px",
+        gap: "0px",
+        padding: "0px",
+        width: "429px",
+        height: "112px",
+        margin: "0px",
+      },
+      textLayout: {
+        lineCount: 2,
+        wrapState: "overflowing" as const,
+        hasEllipsis: false,
+        lineClamp: "none",
+        overflowsX: false,
+        overflowsY: true,
+      },
+    };
+    const body = {
+      ...base.elements[0]!,
+      id: "body",
+      tag: "p",
+      selector: "section#hero > header > p.body",
+      textSnippet: "Accelerate LLM training while maximizing GPU efficiency.",
+      bbox: { x: 20, y: 172, width: 416, height: 54 },
+      ancestry: [header.locator, base.root.locator],
+      locator: {
+        ...base.elements[0]!.locator,
+        tag: "p",
+        selector: "section#hero > header > p.body",
+      },
+      identity: { ...base.elements[0]!.identity, semanticTag: "p" },
+      anchorElementId: "body",
+    };
+    const headerGroup: GroupNode = {
+      id: header.id,
+      selector: header.selector,
+      representativeElementId: header.id,
+      representativeElement: header,
+      bbox: header.bbox,
+      area: header.bbox.width * header.bbox.height,
+      depth: header.depth,
+      memberElementIds: [header.id],
+      parentGroupId: base.root.id,
+      childGroupIds: [title.id, body.id],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: true,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: true,
+      },
+    };
+    const titleGroup: GroupNode = {
+      id: title.id,
+      selector: title.selector,
+      representativeElementId: title.id,
+      representativeElement: title,
+      bbox: title.bbox,
+      area: title.bbox.width * title.bbox.height,
+      depth: title.depth,
+      memberElementIds: [title.id],
+      parentGroupId: header.id,
+      childGroupIds: [],
+      mismatchWeight: 0.9,
+      traits: {
+        hasOwnText: true,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const bodyGroup: GroupNode = {
+      id: body.id,
+      selector: body.selector,
+      representativeElementId: body.id,
+      representativeElement: body,
+      bbox: body.bbox,
+      area: body.bbox.width * body.bbox.height,
+      depth: body.depth,
+      memberElementIds: [body.id],
+      parentGroupId: header.id,
+      childGroupIds: [],
+      mismatchWeight: 0.7,
+      traits: {
+        hasOwnText: true,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({
+          x: 20,
+          y: 60,
+          width: 100,
+          height: 30,
+          pixelCount: 3000,
+          kind: "pixel",
+          severity: "medium",
+        }),
+        createRegion({
+          x: 20,
+          y: 40,
+          width: 420,
+          height: 150,
+          pixelCount: 12000,
+          kind: "layout",
+          severity: "medium",
+        }),
+      ],
+      domSnapshot: {
+        ...base,
+        elements: [header, title, body],
+        bindingCandidates: [header, title, body],
+      },
+      groupsById: new Map([
+        [headerGroup.id, headerGroup],
+        [titleGroup.id, titleGroup],
+        [bodyGroup.id, bodyGroup],
+      ]),
+      elementToGroupId: new Map([
+        [header.id, header.id],
+        [title.id, title.id],
+        [body.id, body.id],
+      ]),
+      localizationsByGroupId: new Map([
+        [
+          header.id,
+          {
+            groupId: header.id,
+            attempted: true,
+            found: true,
+            reliable: true,
+            method: "template",
+            confidence: 0.8,
+            ambiguity: 0.1,
+            matchedReferenceBBox: { x: 20, y: 20, width: 460, height: 180 },
+            delta: { dx: 0, dy: 0, dw: 0, dh: 0 },
+            scores: { thumbnail: 0.8, edge: 0.8, ssim: 0.8, geometry: 0.8, structural: 0.8 },
+          },
+        ],
+        [
+          title.id,
+          {
+            groupId: title.id,
+            attempted: true,
+            found: true,
+            reliable: true,
+            method: "template",
+            confidence: 0.88,
+            ambiguity: 0.12,
+            matchedReferenceBBox: { x: 20, y: 47, width: 429, height: 112 },
+            delta: { dx: 0, dy: -5, dw: 0, dh: 0 },
+            scores: { thumbnail: 0.88, edge: 0.82, ssim: 0.81, geometry: 0.8, structural: 0.81 },
+          },
+        ],
+      ]),
+      width: 640,
+      height: 320,
+    });
+
+    expect(analysis.findings.some((finding) => finding.element?.selector === title.selector)).toBe(
+      true,
+    );
+  });
+
+  test("avoids overly specific directional claims when geometry confidence is only moderate", () => {
+    const domSnapshot = createDomSnapshotForTest({
+      tag: "header",
+      selector: "section#hero > header",
+      textSnippet: "Heading block",
+      computedStyle: {
+        fontSize: "16px",
+        lineHeight: "24px",
+        fontWeight: "400",
+        color: "rgb(0, 0, 0)",
+        backgroundColor: "rgba(0, 0, 0, 0)",
+        borderRadius: "0px",
+        gap: "307px",
+        padding: "0px",
+        width: "1152px",
+        height: "162px",
+        margin: "0px",
+      },
+      bbox: {
+        x: 384,
+        y: 164,
+        width: 1152,
+        height: 162,
+      },
+    });
+    const anchor = domSnapshot.elements[0]!;
+    const group: GroupNode = {
+      id: anchor.id,
+      selector: anchor.selector,
+      representativeElementId: anchor.id,
+      representativeElement: anchor,
+      bbox: anchor.bbox,
+      area: anchor.bbox.width * anchor.bbox.height,
+      depth: anchor.depth,
+      memberElementIds: [anchor.id],
+      parentGroupId: null,
+      childGroupIds: [],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: true,
+        hasTextDescendant: true,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({
+          x: 1121,
+          y: 278,
+          width: 387,
+          height: 45,
+          pixelCount: 5924,
+          kind: "mixed",
+          severity: "medium",
+        }),
+      ],
+      domSnapshot,
+      groupsById: new Map([[group.id, group]]),
+      elementToGroupId: new Map([[anchor.id, group.id]]),
+      localizationsByGroupId: new Map([
+        [
+          group.id,
+          {
+            groupId: group.id,
+            attempted: true,
+            found: true,
+            reliable: true,
+            method: "template",
+            confidence: 0.7442,
+            ambiguity: 0.1778,
+            matchedReferenceBBox: {
+              x: 324,
+              y: 169,
+              width: 1152,
+              height: 162,
+            },
+            delta: {
+              dx: -60,
+              dy: 5,
+              dw: 0,
+              dh: 0,
+            },
+            scores: {
+              thumbnail: 0.74,
+              edge: 0.73,
+              ssim: 0.71,
+              geometry: 0.69,
+              structural: 0.8,
+            },
+          },
+        ],
+      ]),
+      width: 1920,
+      height: 1115,
+    });
+
+    expect(analysis.findings[0]?.summary).not.toContain("horizontally offset");
+    expect(analysis.findings[0]?.summary).toContain("matched reference area");
+    expect(analysis.findings[0]?.fixHint).toContain("matched element against the reference");
+  });
+
+  test("merges low-signal child wrapper findings into a meaningful parent group", () => {
+    const baseSnapshot = createDomSnapshotForTest();
+    const parent = {
+      ...baseSnapshot.elements[0]!,
+      id: "card",
+      tag: "article",
+      selector: "section#hero > article.card",
+      textSnippet: null,
+      bbox: {
+        x: 8,
+        y: 8,
+        width: 80,
+        height: 40,
+      },
+      locator: {
+        ...baseSnapshot.elements[0]!.locator,
+        tag: "article",
+        selector: "section#hero > article.card",
+      },
+      identity: {
+        ...baseSnapshot.elements[0]!.identity,
+        semanticTag: "article",
+      },
+      interactivity: {
+        ...baseSnapshot.elements[0]!.interactivity,
+        isInteractive: false,
+      },
+      ancestry: [baseSnapshot.root.locator],
+      anchorElementId: "card",
+    };
+    const childA = {
+      ...baseSnapshot.elements[0]!,
+      id: "card-copy",
+      tag: "div",
+      selector: "section#hero > article.card > div.copy",
+      textSnippet: null,
+      bbox: {
+        x: 12,
+        y: 12,
+        width: 24,
+        height: 10,
+      },
+      locator: {
+        ...baseSnapshot.elements[0]!.locator,
+        tag: "div",
+        selector: "section#hero > article.card > div.copy",
+      },
+      identity: {
+        ...baseSnapshot.elements[0]!.identity,
+        semanticTag: "div",
+      },
+      interactivity: {
+        ...baseSnapshot.elements[0]!.interactivity,
+        isInteractive: false,
+      },
+      ancestry: [parent.locator, baseSnapshot.root.locator],
+      anchorElementId: "card-copy",
+    };
+    const childB = {
+      ...childA,
+      id: "card-meta",
+      selector: "section#hero > article.card > div.meta",
+      bbox: {
+        x: 12,
+        y: 28,
+        width: 28,
+        height: 8,
+      },
+      locator: {
+        ...childA.locator,
+        selector: "section#hero > article.card > div.meta",
+      },
+      anchorElementId: "card-meta",
+    };
+    const parentGroup: GroupNode = {
+      id: parent.id,
+      selector: parent.selector,
+      representativeElementId: parent.id,
+      representativeElement: parent,
+      bbox: parent.bbox,
+      area: parent.bbox.width * parent.bbox.height,
+      depth: parent.depth,
+      memberElementIds: [parent.id],
+      parentGroupId: baseSnapshot.root.id,
+      childGroupIds: [childA.id, childB.id],
+      mismatchWeight: 1,
+      traits: {
+        hasOwnText: false,
+        hasTextDescendant: false,
+        isInteractive: false,
+        hasPaintedBox: true,
+        isGraphicsOnly: false,
+        isComposite: true,
+      },
+    };
+    const childAGroup: GroupNode = {
+      id: childA.id,
+      selector: childA.selector,
+      representativeElementId: childA.id,
+      representativeElement: childA,
+      bbox: childA.bbox,
+      area: childA.bbox.width * childA.bbox.height,
+      depth: childA.depth,
+      memberElementIds: [childA.id],
+      parentGroupId: parent.id,
+      childGroupIds: [],
+      mismatchWeight: 0.7,
+      traits: {
+        hasOwnText: false,
+        hasTextDescendant: false,
+        isInteractive: false,
+        hasPaintedBox: false,
+        isGraphicsOnly: false,
+        isComposite: false,
+      },
+    };
+    const childBGroup: GroupNode = {
+      ...childAGroup,
+      id: childB.id,
+      selector: childB.selector,
+      representativeElementId: childB.id,
+      representativeElement: childB,
+      bbox: childB.bbox,
+      area: childB.bbox.width * childB.bbox.height,
+      memberElementIds: [childB.id],
+      mismatchWeight: 0.6,
+    };
+    const analysis = buildFindingsAnalysis({
+      analysisMode: "dom-elements",
+      rawRegions: [
+        createRegion({ x: 12, y: 12, width: 12, height: 6, pixelCount: 72, kind: "pixel" }),
+        createRegion({ x: 12, y: 28, width: 14, height: 6, pixelCount: 84, kind: "pixel" }),
+      ],
+      domSnapshot: {
+        ...baseSnapshot,
+        elements: [parent, childA, childB],
+        bindingCandidates: [childA, childB],
+      },
+      groupsById: new Map([
+        [parentGroup.id, parentGroup],
+        [childAGroup.id, childAGroup],
+        [childBGroup.id, childBGroup],
+      ]),
+      elementToGroupId: new Map([
+        [childA.id, childA.id],
+        [childB.id, childB.id],
+      ]),
+      localizationsByGroupId: new Map(),
+      width: 100,
+      height: 60,
+    });
+
+    expect(analysis.findings).toHaveLength(1);
+    expect(analysis.findings[0]?.element?.selector).toBe(parent.selector);
+    expect(analysis.findings[0]?.mismatchPixels).toBe(156);
   });
 });
 

@@ -15,6 +15,13 @@ import {
   STRONG_DIMENSION_ASPECT_DELTA,
   STRONG_DIMENSION_DELTA_PX,
 } from "../config/defaults.js";
+import { hasMeaningfulGeometryDrift } from "./geometry.js";
+import { hasMeaningfulSiblingRelationDrift } from "./relations.js";
+import {
+  hasMeaningfulTextValidation,
+  hasStrongTextValidation,
+  isTextOverflowValidation,
+} from "./text-validation.js";
 import type { RecommendationDecision } from "../types/internal.js";
 import { maxSeverity } from "../utils/severity.js";
 
@@ -55,6 +62,14 @@ interface DecisionContext {
   anyColorFinding: boolean;
   hasDomFindings: boolean;
   highCriticalFindingCount: number;
+  meaningfulGeometryFindingCount: number;
+  meaningfulSiblingRelationFindingCount: number;
+  layoutEvidenceFindingCount: number;
+  topFindingsHaveLayoutEvidence: boolean;
+  textValidatedFindingCount: number;
+  strongTextFindingCount: number;
+  textOverflowFindingCount: number;
+  topFindingsHaveTextEvidence: boolean;
 }
 
 interface RecommendationMatrixResult {
@@ -111,6 +126,23 @@ function buildDecisionContext(params: {
   const actionableFindingCount = hasDomFindings
     ? params.findings.filter((finding) => finding.element?.selector).length
     : 0;
+  const meaningfulGeometryFindingCount = params.findings.filter((finding) =>
+    hasMeaningfulGeometryDrift(finding.geometry),
+  ).length;
+  const meaningfulSiblingRelationFindingCount = params.findings.filter((finding) =>
+    hasMeaningfulSiblingRelationDrift(finding.siblingRelation),
+  ).length;
+  const layoutEvidenceFindingCount =
+    meaningfulGeometryFindingCount + meaningfulSiblingRelationFindingCount;
+  const textValidatedFindingCount = params.findings.filter((finding) =>
+    hasMeaningfulTextValidation(finding.textValidation),
+  ).length;
+  const strongTextFindingCount = params.findings.filter((finding) =>
+    hasStrongTextValidation(finding.textValidation),
+  ).length;
+  const textOverflowFindingCount = params.findings.filter((finding) =>
+    isTextOverflowValidation(finding.textValidation),
+  ).length;
 
   return {
     metrics: params.metrics,
@@ -164,6 +196,20 @@ function buildDecisionContext(params: {
     hasDomFindings,
     highCriticalFindingCount:
       (countBySeverity.get("high") ?? 0) + (countBySeverity.get("critical") ?? 0),
+    meaningfulGeometryFindingCount,
+    meaningfulSiblingRelationFindingCount,
+    layoutEvidenceFindingCount,
+    topFindingsHaveLayoutEvidence: topFindings.some(
+      (finding) =>
+        hasMeaningfulGeometryDrift(finding.geometry) ||
+        hasMeaningfulSiblingRelationDrift(finding.siblingRelation),
+    ),
+    textValidatedFindingCount,
+    strongTextFindingCount,
+    textOverflowFindingCount,
+    topFindingsHaveTextEvidence: topFindings.some((finding) =>
+      hasMeaningfulTextValidation(finding.textValidation),
+    ),
   };
 }
 
@@ -279,9 +325,13 @@ function finalizeRecommendation(
       strongestSeverity([context.highestFindingSeverity, strengthToSeverity(retryStrength)]),
       sanityCheckTrace
         ? sanityCheckTrace.reason
-        : hasBroadRetryPressure
-          ? `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; broad or diffuse issues were detected, but no hard-stop setup risk was found, so another automated fix attempt is still warranted.`
-          : `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; localized, fixable issues were detected and should be corrected before retrying.`,
+        : context.textOverflowFindingCount > 0
+          ? `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; localized text blocks show regression and should be corrected before retrying.`
+          : context.topFindingsHaveTextEvidence
+            ? `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; localized text blocks differ from the reference and should be corrected before retrying.`
+            : hasBroadRetryPressure
+              ? `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; broad or diffuse issues were detected, but no hard-stop setup risk was found, so another automated fix attempt is still warranted.`
+              : `Mismatch is ${context.metrics.mismatchPercent.toFixed(2)}%; localized, fixable issues were detected and should be corrected before retrying.`,
       axisTraces,
     );
   }
@@ -407,14 +457,20 @@ function evaluateSetupCaptureRiskAxis(context: DecisionContext): DecisionTraceRe
     );
     const signalCodes = collectSignalCodes(riskyFindings);
 
+    const concreteTextEvidence =
+      !context.captureRiskSignalDetected &&
+      context.viewportRiskSignalDetected &&
+      context.strongTextFindingCount >= 2;
+
     return createTrace({
       axis: "setup_capture_risk",
       code: "setup_capture_signal_risk",
       outcome: "retry_fix",
-      strength: "high",
-      reason:
-        signalCodes.includes("possible_capture_crop") &&
-        signalCodes.includes("possible_viewport_mismatch")
+      strength: concreteTextEvidence ? "low" : "high",
+      reason: concreteTextEvidence
+        ? "Viewport or frame mismatch signals are present, but multiple concrete text findings were localized; treat setup risk as secondary until those text regressions are checked."
+        : signalCodes.includes("possible_capture_crop") &&
+            signalCodes.includes("possible_viewport_mismatch")
           ? "Run a sanity check to confirm the preview and reference depict the same target; if they do, continue automated fixes despite cropped or mismatched framing signals."
           : signalCodes.includes("possible_capture_crop")
             ? "Run a sanity check to confirm the preview and reference depict the same target before fixing; capture crop was detected."
@@ -457,7 +513,17 @@ function evaluateLayoutAxis(context: DecisionContext): DecisionTraceReport | nul
   const layoutFindings = context.findings.filter(
     (finding) => finding.kind === "layout" || finding.kind === "mixed",
   );
-  const relevantFindings = layoutFindings.length > 0 ? layoutFindings : context.topFindings;
+  const evidenceFindings = context.findings.filter(
+    (finding) =>
+      hasMeaningfulGeometryDrift(finding.geometry) ||
+      hasMeaningfulSiblingRelationDrift(finding.siblingRelation),
+  );
+  const relevantFindings =
+    layoutFindings.length > 0
+      ? layoutFindings
+      : evidenceFindings.length > 0
+        ? evidenceFindings
+        : context.topFindings;
   const structuralMismatchPercent = context.metrics.structuralMismatchPercent ?? 0;
 
   if (relevantFindings.length === 0) {
@@ -468,15 +534,22 @@ function evaluateLayoutAxis(context: DecisionContext): DecisionTraceReport | nul
     structuralMismatchPercent >= LAYOUT_GLOBAL_THRESHOLD ||
     (context.layoutFindingRatio >= 0.5 &&
       context.topFindingsMismatchShare < 0.5 &&
-      context.anyHighCriticalLayoutFinding)
+      context.anyHighCriticalLayoutFinding) ||
+    (context.layoutEvidenceFindingCount >= 4 &&
+      context.topFindingsMismatchShare < DIFFUSE_SHARE_THRESHOLD)
   ) {
     return createTrace({
       axis: "layout",
       code: "layout_global_drift",
       outcome: "retry_fix",
       strength: "high",
-      reason:
-        "Layout drift appears broad rather than localized, so fixing may require multiple automated passes.",
+      reason: context.topFindingsHaveTextEvidence
+        ? "Text block drift appears across multiple localized findings, so fixing may require coordinated text and layout adjustments."
+        : context.meaningfulSiblingRelationFindingCount > 0
+          ? "Spacing or alignment drift appears across multiple localized groups, so fixing may require multiple coordinated passes."
+          : context.meaningfulGeometryFindingCount > 0
+            ? "Position or size drift appears across multiple localized groups, so fixing may require multiple coordinated passes."
+            : "Layout drift appears broad rather than localized, so fixing may require multiple automated passes.",
       findingIds: selectFindingIds(relevantFindings),
       signalCodes: collectSignalCodes(relevantFindings),
       metricKeys: ["structuralMismatchPercent"],
@@ -485,7 +558,8 @@ function evaluateLayoutAxis(context: DecisionContext): DecisionTraceReport | nul
 
   if (
     (structuralMismatchPercent >= LAYOUT_LOCALIZED_THRESHOLD ||
-      context.anyMediumHighLayoutFinding) &&
+      context.anyMediumHighLayoutFinding ||
+      context.topFindingsHaveLayoutEvidence) &&
     context.topFindingsMismatchShare >= LOCALIZED_SHARE_THRESHOLD
   ) {
     return createTrace({
@@ -493,7 +567,13 @@ function evaluateLayoutAxis(context: DecisionContext): DecisionTraceReport | nul
       code: "layout_localized_drift",
       outcome: "retry_fix",
       strength: "medium",
-      reason: "Layout drift appears localized to a small set of findings and is likely fixable.",
+      reason: context.topFindingsHaveTextEvidence
+        ? "Text block behavior appears localized to a small set of findings and is likely fixable."
+        : context.meaningfulSiblingRelationFindingCount > 0
+          ? "Spacing or alignment drift appears localized to a small set of neighboring groups and is likely fixable."
+          : context.meaningfulGeometryFindingCount > 0
+            ? "Position or size drift appears localized to a small set of groups and is likely fixable."
+            : "Layout drift appears localized to a small set of findings and is likely fixable.",
       findingIds: selectFindingIds(relevantFindings),
       signalCodes: collectSignalCodes(relevantFindings),
       metricKeys: ["structuralMismatchPercent"],
@@ -633,7 +713,13 @@ function evaluateFixabilityAxis(context: DecisionContext): DecisionTraceReport |
       outcome: "retry_fix",
       strength: "high",
       reason:
-        "The dominant findings are concentrated and actionable enough for another automated fix attempt.",
+        context.textOverflowFindingCount > 0
+          ? "The dominant findings are concentrated on concrete text blocks with overflow evidence, so another automated typography fix attempt is well-scoped."
+          : context.topFindingsHaveTextEvidence
+            ? "The dominant findings are concentrated on concrete text blocks with usable text evidence, so another automated fix attempt is well-scoped."
+            : context.topFindingsHaveLayoutEvidence
+              ? "The dominant findings are concentrated on concrete DOM groups with usable geometry or sibling-spacing evidence, so another automated fix attempt is well-scoped."
+              : "The dominant findings are concentrated and actionable enough for another automated fix attempt.",
       findingIds: selectFindingIds(context.topFindings),
       signalCodes: collectSignalCodes(context.topFindings),
       metricKeys: ["mismatchPercent"],

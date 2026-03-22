@@ -1,12 +1,38 @@
 import { createHash } from "node:crypto";
 import {
+  buildGeometryDrift,
+  hasMeaningfulGeometryDrift,
+  mergeAffectedPropertiesForGeometry,
+  mergeIssueTypesForGeometry,
+  refineFindingCodeWithGeometry,
+} from "./geometry.js";
+import {
+  buildSiblingRelationsIndex,
+  hasMeaningfulSiblingRelationDrift,
+  mergeAffectedPropertiesForSiblingRelation,
+  mergeIssueTypesForSiblingRelation,
+  refineFindingCodeWithSiblingRelation,
+} from "./relations.js";
+import {
+  buildTextValidation,
+  hasMeaningfulTextValidation,
+  mergeAffectedPropertiesForTextValidation,
+  mergeIssueTypesForTextValidation,
+  refineFindingCodeWithTextValidation,
+} from "./text-validation.js";
+import {
+  CORRESPONDENCE_REPORTING_GRAPHICS_MAX_AREA_PX,
+  CORRESPONDENCE_REPORTING_UNRESOLVED_CONFIDENCE,
   DEFAULT_CLUSTER_PADDING_PX,
   DEFAULT_DOM_OVERLAP_THRESHOLD,
   DEFAULT_HOTSPOT_CLUSTER_PADDING_PX,
   DEFAULT_HOTSPOT_LIMIT_PER_FINDING,
   DEFAULT_MAX_TAG_ROLLUPS,
   DEFAULT_REPORT_FINDINGS_LIMIT,
+  FINDING_DIRECTIONAL_GEOMETRY_CONFIDENCE,
+  FINDING_DIRECTIONAL_GEOMETRY_MAX_AMBIGUITY,
 } from "../config/defaults.js";
+import type { GroupLocalization, GroupNode } from "../correspond/types.js";
 import type {
   ComparisonRegion,
   DomBindingCandidate,
@@ -49,6 +75,7 @@ import { compareSeverityDescending, maxSeverity } from "../utils/severity.js";
 interface DraftFinding {
   rootCauseGroupId: RootCauseGroupId;
   source: FindingSource;
+  granularity?: "group" | "leaf";
   kind: RegionKind;
   code: FindingCode;
   severity: Severity;
@@ -65,11 +92,22 @@ interface DraftFinding {
   hotspots: BoundingBox[];
   element?: DetailedFindingElementReport;
   context?: FindingContextReport;
+  correspondence?: GroupLocalization;
+  geometry?: FindingReport["geometry"];
+  siblingRelation?: FindingReport["siblingRelation"];
+  textValidation?: FindingReport["textValidation"];
 }
 
 interface DraftFindingGroup {
   finding: DraftFinding;
   regions: ComparisonRegion[];
+}
+
+interface DomFindingSeed {
+  anchor: DomSnapshotElement;
+  groupId: string;
+  regions: ComparisonRegion[];
+  assignments: DomAssignmentResult[];
 }
 
 interface DomAssignmentResult {
@@ -123,6 +161,9 @@ export function buildFindingsAnalysis(params: {
   analysisMode: AnalysisMode;
   rawRegions: ComparisonRegion[];
   domSnapshot: DomSnapshot | null;
+  groupsById?: Map<string, GroupNode> | null;
+  elementToGroupId?: Map<string, string> | null;
+  localizationsByGroupId?: Map<string, GroupLocalization> | null;
   width: number;
   height: number;
 }): {
@@ -141,6 +182,9 @@ export function buildFindingsAnalysis(params: {
       ? buildDomFindings(
           params.rawRegions,
           params.domSnapshot,
+          params.groupsById ?? null,
+          params.elementToGroupId ?? null,
+          params.localizationsByGroupId ?? null,
           params.width,
           params.height,
           totalPixels,
@@ -361,6 +405,9 @@ function compareStableIdCollision(left: DraftFinding, right: DraftFinding): numb
 function buildDomFindings(
   rawRegions: ComparisonRegion[],
   domSnapshot: DomSnapshot | null,
+  groupsById: Map<string, GroupNode> | null,
+  elementToGroupId: Map<string, string> | null,
+  localizationsByGroupId: Map<string, GroupLocalization> | null,
   width: number,
   height: number,
   totalPixels: number,
@@ -381,14 +428,15 @@ function buildDomFindings(
   const anchorsById = new Map(
     [domSnapshot.root, ...domSnapshot.elements].map((element) => [element.id, element]),
   );
-  const groupsByAnchorId = new Map<
-    string,
-    {
-      anchor: DomSnapshotElement;
-      regions: ComparisonRegion[];
-      assignments: DomAssignmentResult[];
-    }
-  >();
+  const selectorToGroupId =
+    groupsById === null
+      ? null
+      : new Map([...groupsById.values()].map((group) => [group.selector, group.id]));
+  const siblingRelationsByGroupId =
+    groupsById && localizationsByGroupId
+      ? buildSiblingRelationsIndex(groupsById, localizationsByGroupId)
+      : null;
+  const groupsByAnchorId = new Map<string, DomFindingSeed>();
   const fallbackRegions: ComparisonRegion[] = [];
 
   for (const region of rawRegions) {
@@ -409,33 +457,51 @@ function buildDomFindings(
       throw error;
     }
 
-    const existing = groupsByAnchorId.get(assignment.anchor.id);
+    const rawGroupId = elementToGroupId?.get(assignment.anchor.id) ?? assignment.anchor.id;
+    const groupId = selectReportingGroupId(
+      rawGroupId,
+      groupsById,
+      localizationsByGroupId,
+      selectorToGroupId,
+    );
+    const representative = groupsById?.get(groupId)?.representativeElement ?? assignment.anchor;
+    const existing = groupsByAnchorId.get(groupId);
 
     if (existing) {
       existing.regions.push(region);
       existing.assignments.push(assignment);
     } else {
-      groupsByAnchorId.set(assignment.anchor.id, {
-        anchor: assignment.anchor,
+      groupsByAnchorId.set(groupId, {
+        anchor: representative,
+        groupId,
         regions: [region],
         assignments: [assignment],
       });
     }
   }
 
+  const mergedDomFindingSeeds = mergeLowSignalDomFindingSeeds(
+    [...groupsByAnchorId.values()],
+    groupsById,
+    localizationsByGroupId,
+    siblingRelationsByGroupId,
+  );
   const domFindingGroups = Array.from(
-    groupsByAnchorId.values(),
-    ({ anchor, regions, assignments }) => {
+    mergedDomFindingSeeds,
+    ({ anchor, groupId, regions, assignments }) => {
       const representativeAssignment = selectRepresentativeDomAssignment(assignments);
 
       return {
         finding: buildDraftFinding({
           source: "dom-element",
+          granularity: groupsById?.has(groupId) ? "group" : "leaf",
           regions,
           totalPixels,
           element: anchor,
           signalElement: representativeAssignment.candidate,
-          context: representativeAssignment.context,
+          context: buildContextForElement(anchor, representativeAssignment),
+          correspondence: localizationsByGroupId?.get(groupId),
+          siblingRelation: siblingRelationsByGroupId?.get(groupId),
           canvasWidth: width,
           canvasHeight: height,
         }),
@@ -452,6 +518,118 @@ function buildDomFindings(
     ...domFindingGroups,
     ...buildVisualClusterFindings(fallbackRegions, totalPixels, width, height),
   ];
+}
+
+function mergeLowSignalDomFindingSeeds(
+  seeds: DomFindingSeed[],
+  groupsById: Map<string, GroupNode> | null,
+  localizationsByGroupId: Map<string, GroupLocalization> | null,
+  siblingRelationsByGroupId: Map<string, FindingReport["siblingRelation"]> | null,
+): DomFindingSeed[] {
+  if (!groupsById || seeds.length === 0) {
+    return seeds;
+  }
+
+  const merged = new Map<string, DomFindingSeed>();
+
+  for (const seed of seeds) {
+    const targetGroupId = resolveMergedGroupId(
+      seed.groupId,
+      groupsById,
+      localizationsByGroupId,
+      siblingRelationsByGroupId,
+    );
+    const targetGroup = groupsById.get(targetGroupId);
+    const targetAnchor = targetGroup?.representativeElement ?? seed.anchor;
+    const existing = merged.get(targetGroupId);
+
+    if (existing) {
+      existing.regions.push(...seed.regions);
+      existing.assignments.push(...seed.assignments);
+      continue;
+    }
+
+    merged.set(targetGroupId, {
+      anchor: targetAnchor,
+      groupId: targetGroupId,
+      regions: [...seed.regions],
+      assignments: [...seed.assignments],
+    });
+  }
+
+  return [...merged.values()];
+}
+
+function resolveMergedGroupId(
+  groupId: string,
+  groupsById: Map<string, GroupNode>,
+  localizationsByGroupId: Map<string, GroupLocalization> | null,
+  siblingRelationsByGroupId: Map<string, FindingReport["siblingRelation"]> | null,
+): string {
+  let currentGroup = groupsById.get(groupId);
+
+  if (!currentGroup) {
+    return groupId;
+  }
+
+  while (currentGroup) {
+    const parentGroupId = currentGroup.parentGroupId;
+
+    if (!parentGroupId) {
+      return currentGroup.id;
+    }
+
+    const parentGroup = groupsById.get(parentGroupId);
+
+    if (!parentGroup) {
+      return currentGroup.id;
+    }
+
+    if (
+      !isLowSignalWrapperGroup(
+        currentGroup,
+        localizationsByGroupId?.get(currentGroup.id),
+        siblingRelationsByGroupId?.get(currentGroup.id),
+      )
+    ) {
+      return currentGroup.id;
+    }
+
+    if (!isMeaningfulMergeTarget(parentGroup)) {
+      currentGroup = parentGroup;
+      continue;
+    }
+
+    return parentGroup.id;
+  }
+
+  return groupId;
+}
+
+function isLowSignalWrapperGroup(
+  group: GroupNode,
+  localization: GroupLocalization | undefined,
+  siblingRelation: FindingReport["siblingRelation"] | undefined,
+): boolean {
+  return (
+    group.representativeElement.tag === "div" &&
+    !group.traits.hasOwnText &&
+    !group.traits.isInteractive &&
+    !hasMeaningfulGeometryDrift(
+      buildGeometryDrift(group.bbox, localization?.matchedReferenceBBox),
+    ) &&
+    !hasMeaningfulSiblingRelationDrift(siblingRelation)
+  );
+}
+
+function isMeaningfulMergeTarget(group: GroupNode): boolean {
+  return (
+    group.parentGroupId !== null &&
+    (group.representativeElement.tag !== "div" ||
+      group.traits.hasOwnText ||
+      group.traits.isInteractive ||
+      group.childGroupIds.length > 1)
+  );
 }
 
 function isRecoverableDomAssignmentFailure(error: unknown): boolean {
@@ -477,6 +655,7 @@ function buildVisualClusterFindings(
       element: null,
       signalElement: null,
       context: null,
+      correspondence: undefined,
       canvasWidth: width,
       canvasHeight: height,
     }),
@@ -486,11 +665,14 @@ function buildVisualClusterFindings(
 
 function buildDraftFinding(params: {
   source: FindingSource;
+  granularity?: "group" | "leaf";
   regions: ComparisonRegion[];
   totalPixels: number;
   element: DomSnapshotElement | null;
   signalElement: DomSnapshotElement | null;
   context: DetailedFindingContext | null;
+  correspondence?: GroupLocalization | undefined;
+  siblingRelation?: FindingReport["siblingRelation"];
   canvasWidth: number;
   canvasHeight: number;
 }): DraftFinding {
@@ -506,9 +688,50 @@ function buildDraftFinding(params: {
     canvasWidth: params.canvasWidth,
     canvasHeight: params.canvasHeight,
   });
-  const code = buildFindingCode(kind, signals);
+  const geometry = params.correspondence?.reliable
+    ? buildGeometryDrift(primaryBox, params.correspondence.matchedReferenceBBox)
+    : undefined;
+  const signalDrivenCode = buildFindingCode(kind, signals);
+  const geometryDrivenCode = refineFindingCodeWithGeometry(signalDrivenCode, geometry);
+  const relationDrivenCode = refineFindingCodeWithSiblingRelation(
+    geometryDrivenCode,
+    params.siblingRelation,
+  );
+  const textValidation = buildTextValidation({
+    element: params.element
+      ? {
+          tag: params.element.tag,
+          ...(params.element.textSnippet ? { textSnippet: params.element.textSnippet } : {}),
+          bbox: params.element.bbox,
+        }
+      : null,
+    context: params.context,
+    correspondence: params.correspondence,
+    geometry,
+    siblingRelation: params.siblingRelation,
+    signals,
+  });
+  const textDrivenCode = refineFindingCodeWithTextValidation(
+    relationDrivenCode,
+    textValidation,
+    geometry,
+  );
+  const code =
+    params.correspondence &&
+    !params.correspondence.reliable &&
+    textDrivenCode !== "text_clipping" &&
+    textDrivenCode !== "capture_crop" &&
+    textDrivenCode !== "viewport_mismatch"
+      ? "missing_or_extra_content"
+      : textDrivenCode;
   const hotspots = buildHotspotBoxes(params.regions, primaryBox);
-  const issueTypes = issueTypesForKind(kind);
+  const issueTypes = mergeIssueTypesForTextValidation(
+    mergeIssueTypesForSiblingRelation(
+      mergeIssueTypesForGeometry(issueTypesForKind(kind), geometry),
+      params.siblingRelation,
+    ),
+    textValidation,
+  );
   const findingWithoutRootCause: Pick<FindingReport, "code" | "signals" | "element"> = {
     code,
     signals,
@@ -518,6 +741,7 @@ function buildDraftFinding(params: {
   return {
     rootCauseGroupId: rootCauseGroupIdForFinding(findingWithoutRootCause),
     source: params.source,
+    ...(params.granularity ? { granularity: params.granularity } : {}),
     kind,
     code,
     severity: maxSeverity(params.regions.map((region) => region.severity)),
@@ -527,8 +751,24 @@ function buildDraftFinding(params: {
       signals,
       element: elementReport,
     }),
-    summary: buildFindingSummary(kind, elementReport?.tag ?? null),
-    fixHint: findingFixHintForCode(code),
+    summary: buildFindingSummary({
+      code,
+      kind,
+      tag: elementReport?.tag ?? null,
+      geometry,
+      siblingRelation: params.siblingRelation,
+      textValidation,
+      context: params.context,
+      correspondence: params.correspondence,
+    }),
+    fixHint: findingFixHintForCode(
+      code,
+      geometry,
+      params.siblingRelation,
+      textValidation,
+      params.context,
+      params.correspondence,
+    ),
     bbox,
     regionCount: params.regions.length,
     mismatchPixels,
@@ -537,12 +777,110 @@ function buildDraftFinding(params: {
         ? 0
         : Number(((mismatchPixels / params.totalPixels) * 100).toFixed(4)),
     issueTypes,
-    likelyAffectedProperties: findingAffectedPropertiesForCode(code),
+    likelyAffectedProperties: mergeAffectedPropertiesForTextValidation(
+      mergeAffectedPropertiesForGeometry(
+        mergeAffectedPropertiesForSiblingRelation(
+          findingAffectedPropertiesForCode(code),
+          params.siblingRelation,
+        ),
+        geometry,
+      ),
+      textValidation,
+    ),
     signals,
     hotspots,
     ...(elementReport ? { element: elementReport } : {}),
     ...(params.context ? { context: compactFindingContext(params.context) } : {}),
+    ...(params.correspondence ? { correspondence: params.correspondence } : {}),
+    ...(geometry ? { geometry } : {}),
+    ...(params.siblingRelation ? { siblingRelation: params.siblingRelation } : {}),
+    ...(textValidation ? { textValidation } : {}),
   };
+}
+
+function buildContextForElement(
+  anchor: DomSnapshotElement,
+  assignment: DomAssignmentResult,
+): DetailedFindingContext {
+  return {
+    binding: {
+      ...assignment.context.binding,
+      anchorElement: anchor.locator,
+    },
+    semantic: {
+      ancestry: anchor.ancestry,
+      identity: anchor.identity,
+      computedStyle: anchor.computedStyle,
+      textLayout: anchor.textLayout,
+      visibility: anchor.visibility,
+      interactivity: anchor.interactivity,
+      overlapHints: assignment.candidate.overlapHints,
+    },
+  };
+}
+
+function selectReportingGroupId(
+  groupId: string,
+  groupsById: Map<string, GroupNode> | null,
+  localizationsByGroupId: Map<string, GroupLocalization> | null,
+  selectorToGroupId: Map<string, string> | null,
+): string {
+  const group = groupsById?.get(groupId);
+
+  if (!group) {
+    return groupId;
+  }
+
+  const localization = localizationsByGroupId?.get(groupId);
+  const unresolved =
+    !localization ||
+    localization.method === "none" ||
+    localization.confidence < CORRESPONDENCE_REPORTING_UNRESOLVED_CONFIDENCE;
+
+  if (
+    group.traits.isGraphicsOnly &&
+    group.area <= CORRESPONDENCE_REPORTING_GRAPHICS_MAX_AREA_PX &&
+    unresolved
+  ) {
+    const ancestorGroupId = groupsById
+      ? findNearestAncestorReportingGroupId(group, groupsById, selectorToGroupId)
+      : null;
+
+    if (ancestorGroupId) {
+      return ancestorGroupId;
+    }
+  }
+
+  return groupId;
+}
+
+function findNearestAncestorReportingGroupId(
+  group: GroupNode,
+  groupsById: Map<string, GroupNode>,
+  selectorToGroupId: Map<string, string> | null,
+): string | null {
+  for (const ancestor of group.representativeElement.ancestry) {
+    const candidateGroupId = selectorToGroupId?.get(ancestor.selector);
+
+    if (!candidateGroupId || candidateGroupId === group.id) {
+      continue;
+    }
+
+    const candidateGroup = groupsById.get(candidateGroupId);
+
+    if (!candidateGroup) {
+      continue;
+    }
+
+    if (
+      !candidateGroup.traits.isGraphicsOnly ||
+      candidateGroup.area > CORRESPONDENCE_REPORTING_GRAPHICS_MAX_AREA_PX
+    ) {
+      return candidateGroupId;
+    }
+  }
+
+  return group.parentGroupId ?? null;
 }
 
 function selectRepresentativeDomAssignment(
@@ -864,8 +1202,67 @@ function aggregateKind(regions: ComparisonRegion[]): RegionKind {
   return "pixel";
 }
 
-function buildFindingSummary(kind: RegionKind, tag: string | null): string {
+function buildFindingSummary(params: {
+  code: FindingCode;
+  kind: RegionKind;
+  tag: string | null;
+  geometry?: FindingReport["geometry"];
+  siblingRelation?: FindingReport["siblingRelation"];
+  textValidation?: FindingReport["textValidation"];
+  context: DetailedFindingContext | null;
+  correspondence?: GroupLocalization | undefined;
+}): string {
+  const { code, kind, tag, geometry, siblingRelation, textValidation, context, correspondence } =
+    params;
   const subject = tag ? `Element <${tag}>` : "Visual cluster";
+  const textSummary = buildTextValidationSummary(subject, textValidation, context);
+  const relationSummary = buildSiblingRelationSummary(subject, siblingRelation);
+  const geometrySummary = buildGeometrySummary(subject, geometry, correspondence);
+  const overflowObservation = buildOverflowObservation(context);
+
+  if (textSummary) {
+    if (code === "layout_style_mismatch") {
+      return `${textSummary.replace(/\.$/, "")} and visual styling differs.`;
+    }
+
+    return textSummary;
+  }
+
+  if (code === "text_clipping") {
+    return overflowObservation
+      ? `${subject} text appears clipped or constrained; ${overflowObservation}.`
+      : `${subject} text appears clipped or constrained.`;
+  }
+
+  if (code === "capture_crop") {
+    return `${subject} appears cropped or framed too tightly in the preview capture.`;
+  }
+
+  if (code === "viewport_mismatch") {
+    return `${subject} appears tied to the wrong viewport or reference frame.`;
+  }
+
+  if (code === "missing_or_extra_content") {
+    return overflowObservation
+      ? `${subject} could not be matched reliably, and ${overflowObservation}.`
+      : `${subject} appears missing, extra, or mapped to the wrong reference area.`;
+  }
+
+  if (code === "layout_mismatch") {
+    return relationSummary ?? geometrySummary ?? `${subject} has layout drift.`;
+  }
+
+  if (code === "layout_style_mismatch") {
+    return (
+      relationSummary?.replace(/\.$/, " and visual styling differs.") ??
+      geometrySummary?.replace(/\.$/, " and visual styling differs.") ??
+      `${subject} has layout and style drift.`
+    );
+  }
+
+  if (code === "style_mismatch") {
+    return `${subject} visual styling differs from the reference.`;
+  }
 
   switch (kind) {
     case "dimension":
@@ -879,6 +1276,135 @@ function buildFindingSummary(kind: RegionKind, tag: string | null): string {
     case "pixel":
     default:
       return `${subject} has rendering drift.`;
+  }
+}
+
+function buildTextValidationSummary(
+  subject: string,
+  textValidation: FindingReport["textValidation"] | undefined,
+  context: DetailedFindingContext | null,
+): string | null {
+  if (!textValidation || !hasMeaningfulTextValidation(textValidation)) {
+    return null;
+  }
+
+  const overflowObservation = buildOverflowObservation(context);
+
+  switch (textValidation.diagnosisKind) {
+    case "text_overflow":
+      return overflowObservation
+        ? `${subject} text appears clipped or constrained; ${overflowObservation}.`
+        : `${subject} text appears clipped or constrained relative to the reference.`;
+    case "text_height_drift":
+      return `${subject} text block differs in vertical extent from the reference.`;
+    case "text_position_drift":
+      if (textValidation.allowsDirectionalClaim) {
+        const directionalObservation = textValidation.observations.find((observation) =>
+          /offset/i.test(observation),
+        );
+
+        if (directionalObservation) {
+          return `${subject} ${directionalObservation.replace(/^Matched text block /i, "").replace(/\.$/, "")}.`;
+        }
+      }
+
+      return `${subject} text block position differs from the matched reference area.`;
+    case "text_style_drift":
+      return `${subject} text styling differs from the reference.`;
+    case "uncertain":
+    default:
+      return null;
+  }
+}
+
+function buildGeometrySummary(
+  subject: string,
+  geometry: FindingReport["geometry"] | undefined,
+  correspondence: GroupLocalization | undefined,
+): string | null {
+  if (!geometry || !hasMeaningfulGeometryDrift(geometry)) {
+    return null;
+  }
+
+  const delta = correspondence?.delta;
+  const strongDirectionalEvidence = hasStrongDirectionalGeometryEvidence(correspondence);
+
+  if (
+    strongDirectionalEvidence &&
+    geometry.positionShiftLevel !== "none" &&
+    geometry.sizeShiftLevel === "none" &&
+    delta
+  ) {
+    if (Math.abs(delta.dy) > Math.abs(delta.dx) * 1.5) {
+      return `${subject} is vertically offset from the reference by about ${Math.abs(delta.dy)}px.`;
+    }
+
+    if (Math.abs(delta.dx) > Math.abs(delta.dy) * 1.5) {
+      return `${subject} is horizontally offset from the reference by about ${Math.abs(delta.dx)}px.`;
+    }
+
+    return `${subject} is shifted relative to the reference by about ${Math.round(geometry.centerShiftPx)}px.`;
+  }
+
+  if (
+    strongDirectionalEvidence &&
+    geometry.sizeShiftLevel !== "none" &&
+    geometry.positionShiftLevel === "none" &&
+    delta
+  ) {
+    if (Math.abs(delta.dw) > Math.abs(delta.dh) * 1.5) {
+      return `${subject} is ${delta.dw > 0 ? "wider" : "narrower"} than the reference by about ${Math.abs(delta.dw)}px.`;
+    }
+
+    if (Math.abs(delta.dh) > Math.abs(delta.dw) * 1.5) {
+      return `${subject} is ${delta.dh > 0 ? "taller" : "shorter"} than the reference by about ${Math.abs(delta.dh)}px.`;
+    }
+
+    return `${subject} size differs from the reference.`;
+  }
+
+  if (
+    strongDirectionalEvidence &&
+    geometry.positionShiftLevel !== "none" &&
+    geometry.sizeShiftLevel !== "none" &&
+    delta
+  ) {
+    return `${subject} position and size differ from the reference.`;
+  }
+
+  if (geometry.dominantDrift === "position") {
+    return `${subject} differs from the matched reference area in position.`;
+  }
+
+  if (geometry.dominantDrift === "size") {
+    return `${subject} differs from the matched reference area in size.`;
+  }
+
+  if (geometry.dominantDrift === "mixed") {
+    return `${subject} differs from the matched reference area in position and size.`;
+  }
+
+  return `${subject} differs from the matched reference area.`;
+}
+
+function buildSiblingRelationSummary(
+  subject: string,
+  siblingRelation: FindingReport["siblingRelation"] | undefined,
+): string | null {
+  if (!siblingRelation || !hasMeaningfulSiblingRelationDrift(siblingRelation)) {
+    return null;
+  }
+
+  switch (siblingRelation.dominantDrift) {
+    case "spacing":
+      return `${subject} spacing relative to a nearby sibling differs from the reference.`;
+    case "alignment":
+      return `${subject} alignment relative to a nearby sibling differs from the reference.`;
+    case "mixed":
+      return `${subject} spacing and alignment relative to a nearby sibling differ from the reference.`;
+    case "none":
+    default:
+      return null;
   }
 }
 
@@ -935,26 +1461,231 @@ function buildFindingCode(kind: RegionKind, signals: FindingSignalReport[]): Fin
   }
 }
 
-function findingFixHintForCode(code: FindingCode): string {
+function findingFixHintForCode(
+  code: FindingCode,
+  geometry?: FindingReport["geometry"],
+  siblingRelation?: FindingReport["siblingRelation"],
+  textValidation?: FindingReport["textValidation"],
+  context?: DetailedFindingContext | null,
+  correspondence?: GroupLocalization,
+): string {
+  const layoutHint = buildLayoutFixHint(geometry, siblingRelation, correspondence);
+  const overflowHint = buildOverflowFixHint(context);
+  const textOverflowHint = buildTextOverflowFixHint(context);
+  const textValidationHint = buildTextValidationFixHint(textValidation);
+
   switch (code) {
     case "text_clipping":
-      return "Fix text overflow, line clamp, or available width.";
+      return (
+        textOverflowHint ??
+        textValidationHint ??
+        "Fix text overflow, line clamp, or available width."
+      );
     case "capture_crop":
       return "Recapture with a broader selector scope or viewport.";
     case "viewport_mismatch":
       return "Verify viewport, selected frame, and capture target before retrying.";
     case "missing_or_extra_content":
-      return "Verify the target content and frame, then fix missing or extra UI.";
+      return (
+        overflowHint ??
+        textValidationHint ??
+        "Verify the target content and frame, then fix missing or extra UI."
+      );
     case "layout_mismatch":
-      return "Fix positioning, spacing, or alignment.";
+      return textValidationHint ?? layoutHint ?? "Fix positioning, spacing, or alignment.";
     case "style_mismatch":
-      return "Fix colors, fills, borders, or shadows.";
+      return textValidationHint ?? "Fix colors, fills, borders, or shadows.";
     case "layout_style_mismatch":
-      return "Fix both layout alignment and visual styles.";
+      if (textValidationHint) {
+        return `${textValidationHint.replace(/\.$/, "")} Then reconcile colors, fills, borders, or shadows.`;
+      }
+
+      return layoutHint
+        ? `${layoutHint.replace(/\.$/, "")} Then reconcile colors, fills, borders, or shadows.`
+        : "Fix both layout alignment and visual styles.";
     case "rendering_mismatch":
     default:
       return "Tighten typography, radius, or shadow styling.";
   }
+}
+
+function buildLayoutFixHint(
+  geometry: FindingReport["geometry"] | undefined,
+  siblingRelation: FindingReport["siblingRelation"] | undefined,
+  correspondence: GroupLocalization | undefined,
+): string | null {
+  if (siblingRelation && hasMeaningfulSiblingRelationDrift(siblingRelation)) {
+    switch (siblingRelation.dominantDrift) {
+      case "spacing":
+        return "Fix gap or spacing relative to neighboring elements.";
+      case "alignment":
+        return "Fix cross-axis alignment relative to neighboring elements.";
+      case "mixed":
+        return "Fix neighboring gap and alignment relative to the reference.";
+      case "none":
+      default:
+        break;
+    }
+  }
+
+  if (geometry && hasMeaningfulGeometryDrift(geometry)) {
+    const delta = correspondence?.delta;
+    const strongDirectionalEvidence = hasStrongDirectionalGeometryEvidence(correspondence);
+
+    if (
+      strongDirectionalEvidence &&
+      delta &&
+      geometry.positionShiftLevel !== "none" &&
+      geometry.sizeShiftLevel === "none"
+    ) {
+      if (Math.abs(delta.dy) > Math.abs(delta.dx) * 1.5) {
+        return "Check top/bottom spacing or vertical positioning for this element.";
+      }
+
+      if (Math.abs(delta.dx) > Math.abs(delta.dy) * 1.5) {
+        return "Check horizontal positioning or left/right alignment for this element.";
+      }
+
+      return "Check element positioning relative to the reference.";
+    }
+
+    if (
+      strongDirectionalEvidence &&
+      delta &&
+      geometry.sizeShiftLevel !== "none" &&
+      geometry.positionShiftLevel === "none"
+    ) {
+      if (Math.abs(delta.dw) > Math.abs(delta.dh) * 1.5) {
+        return "Check container width and available content width for this element.";
+      }
+
+      if (Math.abs(delta.dh) > Math.abs(delta.dw) * 1.5) {
+        return "Check element height and vertical sizing for this element.";
+      }
+
+      return "Check element sizing relative to the reference.";
+    }
+
+    if (
+      strongDirectionalEvidence &&
+      delta &&
+      geometry.positionShiftLevel !== "none" &&
+      geometry.sizeShiftLevel !== "none"
+    ) {
+      return "Check both element positioning and sizing relative to the reference.";
+    }
+
+    return "Check the matched element against the reference before making a more specific layout change.";
+  }
+
+  return null;
+}
+
+function buildTextValidationFixHint(
+  textValidation: FindingReport["textValidation"] | undefined,
+): string | null {
+  if (!textValidation || !hasMeaningfulTextValidation(textValidation)) {
+    return null;
+  }
+
+  switch (textValidation.diagnosisKind) {
+    case "text_overflow":
+      return "Check line-height, available text width or height, and resulting text wrapping.";
+    case "text_height_drift":
+      return "Check line-height, text block height, or vertical text spacing.";
+    case "text_position_drift":
+      return textValidation.allowsDirectionalClaim
+        ? "Check text block positioning relative to the reference."
+        : "Check the matched text block against the reference before making a more specific typography change.";
+    case "text_style_drift":
+      return "Check typography styles such as font size, line height, or weight.";
+    case "uncertain":
+    default:
+      return null;
+  }
+}
+
+function hasStrongDirectionalGeometryEvidence(
+  correspondence: GroupLocalization | undefined,
+): boolean {
+  return Boolean(
+    correspondence &&
+    correspondence.reliable &&
+    correspondence.confidence >= FINDING_DIRECTIONAL_GEOMETRY_CONFIDENCE &&
+    correspondence.ambiguity <= FINDING_DIRECTIONAL_GEOMETRY_MAX_AMBIGUITY,
+  );
+}
+
+function buildOverflowObservation(context: DetailedFindingContext | null): string | null {
+  const textLayout = context?.semantic.textLayout;
+
+  if (!textLayout || (!textLayout.overflowsX && !textLayout.overflowsY)) {
+    return null;
+  }
+
+  const sizeLabel = previewSizeLabel(
+    context.semantic.computedStyle.width,
+    context.semantic.computedStyle.height,
+  );
+
+  if (textLayout.overflowsX && textLayout.overflowsY) {
+    return `preview content overflows its current ${sizeLabel} box on both axes`;
+  }
+
+  if (textLayout.overflowsX) {
+    return `preview content overflows its current ${sizeLabel} box horizontally`;
+  }
+
+  return `preview content overflows its current ${sizeLabel} box vertically`;
+}
+
+function buildOverflowFixHint(context: DetailedFindingContext | null | undefined): string | null {
+  const textLayout = context?.semantic.textLayout;
+
+  if (!textLayout || (!textLayout.overflowsX && !textLayout.overflowsY)) {
+    return null;
+  }
+
+  if (textLayout.overflowsX && textLayout.overflowsY) {
+    return "Check container size and resulting text wrapping before assuming content is missing.";
+  }
+
+  if (textLayout.overflowsX) {
+    return "Check container width and resulting text wrapping before assuming content is missing.";
+  }
+
+  return "Check container height and vertical content sizing before assuming content is missing.";
+}
+
+function buildTextOverflowFixHint(
+  context: DetailedFindingContext | null | undefined,
+): string | null {
+  const textLayout = context?.semantic.textLayout;
+
+  if (!textLayout || (!textLayout.overflowsX && !textLayout.overflowsY)) {
+    return null;
+  }
+
+  if (textLayout.overflowsX && textLayout.overflowsY) {
+    return "Fix text overflow by checking line-height, container size, and resulting text wrapping.";
+  }
+
+  if (textLayout.overflowsX) {
+    return "Fix text overflow by checking line-height, container width, and resulting text wrapping.";
+  }
+
+  return "Fix text overflow by checking line-height, container height, and vertical content sizing.";
+}
+
+function previewSizeLabel(width: string, height: string): string {
+  const widthLabel = width.trim();
+  const heightLabel = height.trim();
+
+  if (widthLabel && heightLabel) {
+    return `${widthLabel} x ${heightLabel}`;
+  }
+
+  return widthLabel || heightLabel || "current";
 }
 
 function findingAffectedPropertiesForCode(code: FindingCode): AffectedPropertyCode[] {
@@ -1234,6 +1965,7 @@ function toFindingReport(id: string, finding: DraftFinding): FindingReport {
     id,
     rootCauseGroupId: finding.rootCauseGroupId,
     source: finding.source,
+    ...(finding.granularity ? { granularity: finding.granularity } : {}),
     kind: finding.kind,
     code: finding.code,
     severity: finding.severity,
@@ -1259,6 +1991,43 @@ function toFindingReport(id: string, finding: DraftFinding): FindingReport {
         }
       : {}),
     ...(finding.context ? { context: finding.context } : {}),
+    ...toCorrespondenceFields(finding.correspondence),
+    ...(finding.geometry ? { geometry: finding.geometry } : {}),
+    ...(finding.siblingRelation ? { siblingRelation: finding.siblingRelation } : {}),
+    ...(finding.textValidation ? { textValidation: finding.textValidation } : {}),
+  };
+}
+
+function toCorrespondenceFields(
+  correspondence: GroupLocalization | undefined,
+): Pick<
+  FindingReport,
+  | "matchedReferenceBBox"
+  | "correspondenceMethod"
+  | "correspondenceConfidence"
+  | "ambiguity"
+  | "delta"
+> {
+  if (!correspondence) {
+    return {};
+  }
+
+  if (!correspondence.reliable) {
+    return {
+      correspondenceMethod: "none",
+      correspondenceConfidence: 0,
+      ambiguity: 1,
+    };
+  }
+
+  return {
+    ...(correspondence.matchedReferenceBBox
+      ? { matchedReferenceBBox: correspondence.matchedReferenceBBox }
+      : {}),
+    correspondenceMethod: correspondence.method,
+    correspondenceConfidence: correspondence.confidence,
+    ambiguity: correspondence.ambiguity,
+    ...(correspondence.delta ? { delta: correspondence.delta } : {}),
   };
 }
 
@@ -1383,17 +2152,17 @@ function buildLargestOmittedRegions(findings: FindingReport[]): OmittedRegionRol
     }));
 }
 
-function compareDraftFindings(
-  left: Pick<DraftFinding, "severity" | "mismatchPixels" | "bbox" | "summary" | "rootCauseGroupId">,
-  right: Pick<
-    DraftFinding,
-    "severity" | "mismatchPixels" | "bbox" | "summary" | "rootCauseGroupId"
-  >,
-): number {
+function compareDraftFindings(left: FindingSortTarget, right: FindingSortTarget): number {
   const severityOrder = compareSeverityDescending(left.severity, right.severity);
 
   if (severityOrder !== 0) {
     return severityOrder;
+  }
+
+  const evidenceOrder = findingEvidenceScore(right) - findingEvidenceScore(left);
+
+  if (evidenceOrder !== 0) {
+    return evidenceOrder;
   }
 
   if (left.mismatchPixels !== right.mismatchPixels) {
@@ -1415,4 +2184,55 @@ function compareDraftFindings(
   }
 
   return left.rootCauseGroupId.localeCompare(right.rootCauseGroupId);
+}
+
+interface FindingSortTarget {
+  severity: Severity;
+  mismatchPixels: number;
+  bbox: BoundingBox;
+  summary: string;
+  rootCauseGroupId: RootCauseGroupId;
+  geometry?: FindingReport["geometry"];
+  siblingRelation?: FindingReport["siblingRelation"];
+  textValidation?: FindingReport["textValidation"];
+  element?: Pick<FindingElementReport, "tag" | "textSnippet">;
+  signals: FindingSignalReport[];
+}
+
+function findingEvidenceScore(finding: FindingSortTarget): number {
+  let score = 0;
+
+  if (hasMeaningfulSiblingRelationDrift(finding.siblingRelation)) {
+    score += 4;
+  }
+
+  if (hasMeaningfulGeometryDrift(finding.geometry)) {
+    score += 3;
+  }
+
+  if (hasMeaningfulTextValidation(finding.textValidation)) {
+    score += 5;
+  }
+
+  if (finding.signals.some((signal) => signal.code === "probable_text_clipping")) {
+    score += 2;
+  }
+
+  if (finding.signals.some((signal) => signal.code === "possible_capture_crop")) {
+    score += 2;
+  }
+
+  if (finding.signals.some((signal) => signal.code === "possible_viewport_mismatch")) {
+    score += 2;
+  }
+
+  if (finding.element?.textSnippet) {
+    score += 1;
+  }
+
+  if (finding.element?.tag && finding.element.tag !== "div") {
+    score += 1;
+  }
+
+  return score;
 }

@@ -3,10 +3,12 @@ import { DEFAULT_MODE } from "../config/defaults.js";
 import { buildFindingsAnalysis } from "../analysis/findings.js";
 import { decideRecommendation } from "../analysis/recommendation.js";
 import { buildSummaryReport, type FailureOrigin } from "../analysis/summary.js";
+import { buildMarkdownTextReport } from "../analysis/text-report.js";
 import { materializePreviewImage } from "../capture/playwright-capture.js";
 import { runComparisonEngine } from "../compare/engine.js";
 import { createHeatmapArtifact } from "../compare/heatmap.js";
-import { ensureDirectory, pathExists, writeJsonFile } from "../io/fs.js";
+import { localizeElementGroups } from "../correspond/index.js";
+import { ensureDirectory, pathExists, writeJsonFile, writeTextFile } from "../io/fs.js";
 import { loadNormalizedImage, padImageToCanvas, writeRawRgbaPng } from "../io/image.js";
 import {
   buildIgnoreSelectorReports,
@@ -40,6 +42,13 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
   validateThresholdOrdering(options);
   const outputDir = await ensureDirectory(options.output);
   const artifactPaths = createArtifactPaths(outputDir);
+  const profilePath = path.join(outputDir, "profile.json");
+  const outerTimingsMs: {
+    previewCapture?: number;
+    referenceFetch?: number;
+    compare?: number;
+    findings?: number;
+  } = {};
 
   let previewInput: ParsedPreviewInput | null = null;
   let referenceInput: ParsedReferenceInput | null = null;
@@ -49,43 +58,106 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
   try {
     previewInput = await parsePreviewInput(options);
     referenceInput = await parseReferenceInput(options.reference);
-    preparedPreview = await materializePreviewImage(
-      previewInput,
-      artifactPaths.preview,
-      options.fullPage,
-    );
-    preparedReference = await materializeReferenceImage(referenceInput, artifactPaths.reference);
+    const previewCapturePromise = (async () => {
+      const startedAt = performance.now();
+      const prepared = await materializePreviewImage(
+        previewInput,
+        artifactPaths.preview,
+        options.fullPage,
+      );
+      outerTimingsMs.previewCapture = roundMetric(performance.now() - startedAt);
+      return prepared;
+    })();
+    const referenceFetchPromise = (async () => {
+      const startedAt = performance.now();
+      const prepared = await materializeReferenceImage(referenceInput, artifactPaths.reference);
+      outerTimingsMs.referenceFetch = roundMetric(performance.now() - startedAt);
+      return prepared;
+    })();
+    const [previewResult, referenceResult] = await Promise.allSettled([
+      previewCapturePromise,
+      referenceFetchPromise,
+    ]);
 
-    const previewImage = await loadNormalizedImage(preparedPreview.path);
-    const referenceImage = await loadNormalizedImage(preparedReference.path);
+    if (previewResult.status === "fulfilled") {
+      preparedPreview = previewResult.value;
+    }
+
+    if (referenceResult.status === "fulfilled") {
+      preparedReference = referenceResult.value;
+    }
+
+    if (previewResult.status === "rejected") {
+      throw previewResult.reason;
+    }
+
+    if (referenceResult.status === "rejected") {
+      throw referenceResult.reason;
+    }
+
+    const finalPreparedPreview = preparedPreview;
+    const finalPreparedReference = preparedReference;
+
+    if (!finalPreparedPreview || !finalPreparedReference) {
+      throw new AppError("Preview or reference could not be prepared for comparison.", {
+        code: "compare_inputs_not_prepared",
+      });
+    }
+
+    const previewImage = await loadNormalizedImage(finalPreparedPreview.path);
+    const referenceImage = await loadNormalizedImage(finalPreparedReference.path);
     const width = Math.max(previewImage.width, referenceImage.width);
     const height = Math.max(previewImage.height, referenceImage.height);
     const paddedPreview = padImageToCanvas(previewImage, width, height);
     const paddedReference = padImageToCanvas(referenceImage, width, height);
 
-    const comparison = runComparisonEngine({
-      reference: paddedReference.data,
-      preview: paddedPreview.data,
-      width,
-      height,
-      ignoreRegions: preparedPreview.ignoreRegions,
-      referenceOriginal: {
-        width: referenceImage.width,
-        height: referenceImage.height,
-      },
-      previewOriginal: {
-        width: previewImage.width,
-        height: previewImage.height,
-      },
-      mode: options.mode ?? DEFAULT_MODE,
-    });
-    const findingsAnalysis = buildFindingsAnalysis({
-      analysisMode: preparedPreview.analysisMode,
-      rawRegions: comparison.rawRegions,
-      domSnapshot: preparedPreview.domSnapshot,
-      width,
-      height,
-    });
+    const comparison = (() => {
+      const startedAt = performance.now();
+      const result = runComparisonEngine({
+        reference: paddedReference.data,
+        preview: paddedPreview.data,
+        width,
+        height,
+        ignoreRegions: finalPreparedPreview.ignoreRegions,
+        referenceOriginal: {
+          width: referenceImage.width,
+          height: referenceImage.height,
+        },
+        previewOriginal: {
+          width: previewImage.width,
+          height: previewImage.height,
+        },
+        mode: options.mode ?? DEFAULT_MODE,
+      });
+      outerTimingsMs.compare = roundMetric(performance.now() - startedAt);
+      return result;
+    })();
+    const corresponded =
+      finalPreparedPreview.analysisMode === "dom-elements" && finalPreparedPreview.domSnapshot !== null
+        ? localizeElementGroups({
+            preview: paddedPreview.data,
+            reference: paddedReference.data,
+            width,
+            height,
+            rawRegions: comparison.rawRegions,
+            domSnapshot: finalPreparedPreview.domSnapshot,
+          })
+        : null;
+    const findingsAnalysis = (() => {
+      const startedAt = performance.now();
+      const result = buildFindingsAnalysis({
+        analysisMode: finalPreparedPreview.analysisMode,
+        rawRegions: comparison.rawRegions,
+        domSnapshot: finalPreparedPreview.domSnapshot,
+        groupsById: corresponded?.groupsById ?? null,
+        elementToGroupId: corresponded?.elementToGroupId ?? null,
+        localizationsByGroupId: corresponded?.localizationsByGroupId ?? null,
+        width,
+        height,
+      });
+      outerTimingsMs.findings = roundMetric(performance.now() - startedAt);
+      return result;
+    })();
     const heatmap = createHeatmapArtifact({
       reference: paddedReference.data,
       preview: paddedPreview.data,
@@ -94,13 +166,6 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
       width,
       height,
     });
-
-    await Promise.all([
-      writeRawRgbaPng(artifactPaths.overlay, comparison.buffers.overlay, width, height),
-      writeRawRgbaPng(artifactPaths.diff, comparison.buffers.diff, width, height),
-      writeRawRgbaPng(artifactPaths.heatmap, heatmap, width, height),
-    ]);
-
     const metrics = {
       ...comparison.metrics,
       findingsCount: findingsAnalysis.metrics.findingsCount,
@@ -119,13 +184,14 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
       baseDecision: decision,
       findings: findingsAnalysis.findings,
       fullFindings: findingsAnalysis.fullFindings,
-      analysisMode: preparedPreview.analysisMode,
+      analysisMode: finalPreparedPreview.analysisMode,
       omittedFindings: findingsAnalysis.rollups.omittedFindings,
       error: null,
+      correspondenceSummary: corresponded?.summary ?? null,
     });
 
     const report: CompareReport = {
-      analysisMode: preparedPreview.analysisMode,
+      analysisMode: finalPreparedPreview.analysisMode,
       summary,
       inputs: {
         preview: {
@@ -133,14 +199,14 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
           kind: previewInput.kind,
           resolved: previewInput.resolved,
           selector: previewInput.selector,
-          ignoreSelectors: preparedPreview.ignoreSelectorMatches,
+          ignoreSelectors: finalPreparedPreview.ignoreSelectorMatches,
         },
         reference: {
           input: referenceInput.input,
           kind: referenceInput.kind,
           resolved: referenceInput.resolved,
           selector: null,
-          transport: preparedReference.transport,
+          transport: finalPreparedReference.transport,
         },
         viewport: resolveViewportForReport(previewInput.viewport, {
           width: previewImage.width,
@@ -160,6 +226,27 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
       artifacts: artifactPaths,
       error: null,
     };
+    const textSummary = buildMarkdownTextReport(report);
+
+    await Promise.all([
+      writeRawRgbaPng(artifactPaths.overlay, comparison.buffers.overlay, width, height),
+      writeRawRgbaPng(artifactPaths.diff, comparison.buffers.diff, width, height),
+      writeRawRgbaPng(artifactPaths.heatmap, heatmap, width, height),
+      writeTextFile(artifactPaths.summary, textSummary),
+      ...(isDebugTimingsEnabled() && corresponded !== null
+        ? [
+            writeJsonFile(profilePath, {
+              timingsMs: {
+                ...outerTimingsMs,
+                ...corresponded.profile.timingsMs,
+              },
+              counts: {
+                ...corresponded.profile.counts,
+              },
+            }),
+          ]
+        : []),
+    ]);
 
     await writeJsonFile(artifactPaths.report, report);
 
@@ -194,6 +281,7 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
         analysisMode: failureAnalysisMode,
         omittedFindings: 0,
         error: errorReport,
+        correspondenceSummary: null,
         failureOrigin: inferFailureOrigin({
           errorCode: error.code,
           previewInput,
@@ -221,8 +309,12 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
         },
         error: errorReport,
       });
+      const textSummary = buildMarkdownTextReport(report);
 
-      await writeJsonFile(artifactPaths.report, report);
+      await Promise.all([
+        writeJsonFile(artifactPaths.report, report),
+        writeTextFile(artifactPaths.summary, textSummary),
+      ]);
 
       return {
         report,
@@ -232,6 +324,14 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
 
     throw error;
   }
+}
+
+function isDebugTimingsEnabled(): boolean {
+  return process.env.PEYE_DEBUG_TIMINGS === "1";
+}
+
+function roundMetric(value: number): number {
+  return Number(value.toFixed(4));
 }
 
 function buildImagesReport(
@@ -287,6 +387,7 @@ function createArtifactPaths(outputDir: string): CompareArtifacts {
     diff: path.join(outputDir, "diff.png"),
     heatmap: path.join(outputDir, "heatmap.png"),
     report: path.join(outputDir, "report.json"),
+    summary: path.join(outputDir, "summary.md"),
   };
 }
 

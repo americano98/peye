@@ -572,11 +572,15 @@ describe("runCompare integration", () => {
       expect(buttonFinding?.code).toBe("text_clipping");
       expect(buttonFinding?.fixHint).toContain("overflow");
       expect(buttonFinding?.confidence).toBeGreaterThanOrEqual(0.8);
-      expect(buttonFinding?.likelyAffectedProperties).toEqual([
-        "text.overflow",
-        "text.lineClamp",
-        "size.width",
-      ]);
+      expect(buttonFinding?.likelyAffectedProperties).toEqual(
+        expect.arrayContaining([
+          "text.overflow",
+          "text.lineClamp",
+          "size.width",
+          "size.height",
+          "style.typography",
+        ]),
+      );
       expect(buttonFinding?.element).toEqual({
         selector: "section#hero > button#cta",
         tag: "button",
@@ -853,14 +857,15 @@ describe("runCompare integration", () => {
       expect(report.summary.primaryBlockers[0]?.rootCauseGroupId).toBe("preview-setup-error");
       expect(report.summary.safeToAutofix).toBe(false);
       expect(report.summary.requiresRecapture).toBe(true);
-      expect(report.images).toEqual({
-        preview: null,
-        reference: null,
-        canvas: null,
+      expect(report.images.preview).toBeNull();
+      expect(report.images.reference).toEqual({
+        width: 120,
+        height: 80,
       });
+      expect(report.images.canvas).toBeNull();
       expect(result.report.findings).toEqual([]);
       expect(report.artifacts.preview).toBeNull();
-      expect(report.artifacts.reference).toBeNull();
+      expect(report.artifacts.reference).toBeTruthy();
       expect(report.artifacts.overlay).toBeNull();
       expect(report.artifacts.diff).toBeNull();
       expect(report.artifacts.heatmap).toBeNull();

@@ -23,6 +23,7 @@ import {
   comparePrimaryBlockers,
   rootCauseGroupIdForFailureOrigin,
 } from "./root-cause-groups.js";
+import { isTextOverflowValidation } from "./text-validation.js";
 import { compareSeverityDescending } from "../utils/severity.js";
 
 export type FailureOrigin = "preview" | "reference" | "unknown";
@@ -126,6 +127,11 @@ export function buildSummaryReport(params: {
   analysisMode: AnalysisMode;
   omittedFindings: number;
   error: ErrorReport | null;
+  correspondenceSummary?: {
+    correspondenceCoverage: number;
+    correspondenceConfidence: number;
+    ambiguousCorrespondences: number;
+  } | null;
   failureOrigin?: FailureOrigin;
 }): SummaryReport {
   const findingOrder = new Map(params.findings.map((finding, index) => [finding.id, index]));
@@ -185,6 +191,9 @@ export function buildSummaryReport(params: {
     safeToAutofix,
     requiresRecapture,
     requiresSanityCheck,
+    correspondenceCoverage: params.correspondenceSummary?.correspondenceCoverage ?? null,
+    correspondenceConfidence: params.correspondenceSummary?.correspondenceConfidence ?? null,
+    ambiguousCorrespondences: params.correspondenceSummary?.ambiguousCorrespondences ?? null,
   };
 }
 
@@ -193,7 +202,11 @@ function buildAgentChecks(decisionTrace: DecisionTraceReport[]): SummaryAgentChe
     (trace) => trace.code === "setup_capture_signal_risk",
   );
 
-  if (!setupSignalTrace || setupSignalTrace.outcome !== "retry_fix") {
+  if (
+    !setupSignalTrace ||
+    setupSignalTrace.outcome !== "retry_fix" ||
+    setupSignalTrace.strength === "low"
+  ) {
     return [];
   }
 
@@ -477,9 +490,13 @@ function buildFindingRootCauseCandidates(
 
     for (const code of rootCauseCodes) {
       const existing = candidates.get(code);
+      const boostedConfidence =
+        isTextOverflowValidation(finding.textValidation) && code === "text_overflow"
+          ? Math.max(finding.confidence, finding.textValidation?.confidence ?? 0)
+          : finding.confidence;
 
       if (existing) {
-        existing.confidence = Math.max(existing.confidence, finding.confidence);
+        existing.confidence = Math.max(existing.confidence, boostedConfidence);
         existing.highestSeverity = moreSevere(existing.highestSeverity, finding.severity);
         existing.findingIds = mergeFindingIds(existing.findingIds, [finding.id], findingOrder);
         existing.signalCodes = mergeSignalCodes(existing.signalCodes, finding.signals);
@@ -488,7 +505,7 @@ function buildFindingRootCauseCandidates(
 
       candidates.set(code, {
         code,
-        confidence: finding.confidence,
+        confidence: boostedConfidence,
         reason: ROOT_CAUSE_REASONS[code],
         findingIds: [finding.id],
         signalCodes: sortSignalCodes(finding.signals.map((signal) => signal.code)),
