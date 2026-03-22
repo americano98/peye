@@ -6,6 +6,7 @@ import {
   DEFAULT_MAX_SELECTOR_LENGTH,
   DEFAULT_MAX_TEXT_SNIPPET_LENGTH,
   DEFAULT_NAVIGATION_TIMEOUT_MS,
+  DEFAULT_RESOURCE_TIMEOUT_MS,
 } from "../config/defaults.js";
 import type { DomSnapshot, ParsedPreviewInput, PreparedPreviewImage } from "../types/internal.js";
 import type { BoundingBox, IgnoreSelectorReport } from "../types/report.js";
@@ -142,6 +143,9 @@ async function navigateForCapture(page: Page, url: string): Promise<void> {
 }
 
 async function waitForCaptureStability(page: Page, locator?: Locator): Promise<void> {
+  await page
+    .waitForLoadState("load", { timeout: DEFAULT_RESOURCE_TIMEOUT_MS })
+    .catch(() => undefined);
   await waitForFontsReady(page);
   await waitForLayoutStability(page, locator);
 }

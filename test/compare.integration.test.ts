@@ -453,6 +453,88 @@ describe("runCompare integration", () => {
     }
   });
 
+  test("waits for delayed image resources before selector capture", async () => {
+    const dir = await createTempDir("peye-stability-image");
+    const referencePath = path.join(dir, "reference.png");
+    const delayedImagePath = path.join(dir, "hero-image.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 240,
+      height: 140,
+      body: `
+        <rect x="20" y="20" width="160" height="40" fill="#ffffff" />
+        <rect x="20" y="20" width="160" height="40" fill="#0b84ff" />
+      `,
+    });
+    await createPngFromSvg({
+      outputPath: delayedImagePath,
+      width: 160,
+      height: 40,
+      body: `<rect x="0" y="0" width="160" height="40" fill="#0b84ff" />`,
+    });
+
+    const imageBuffer = await readFile(delayedImagePath);
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 240px; height: 140px; }
+                #hero img {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  width: 160px;
+                  height: 40px;
+                  display: block;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <img src="/hero-image.png" alt="" />
+              </section>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      if (request.url === "/hero-image.png") {
+        response.setHeader("content-type", "image/png");
+        setTimeout(() => {
+          response.end(imageBuffer);
+        }, 150);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "400x240",
+          mode: "layout",
+        }),
+      );
+
+      expect(result.report.summary.recommendation).toBe("pass");
+      expect(result.report.findings).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
   test("ignores overlapping fixed preview noise and reports selector match counts", async () => {
     const dir = await createTempDir("peye-ignore-fixed");
     const referencePath = path.join(dir, "reference.png");
