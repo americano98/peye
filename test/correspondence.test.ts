@@ -419,4 +419,64 @@ describe("localizeElementGroups", () => {
     expect(result.profile.counts.groupsSearched).toBe(0);
     expect(result.localizationsByGroupId.size).toBe(0);
   });
+
+  test("counts budget-skipped mismatch groups in correspondence coverage", () => {
+    const root = createSnapshotElement({
+      id: "#root",
+      selector: "#root",
+      bbox: { x: 0, y: 0, width: 600, height: 400 },
+      tag: "section",
+      depth: 0,
+    });
+    const elements: DomSnapshotElement[] = [];
+    const rawRegions = [];
+
+    for (let index = 0; index < 14; index += 1) {
+      const x = 20 + index * 50;
+      const id = `#item-${index}`;
+      const element = createSnapshotElement({
+        id,
+        selector: id,
+        tag: "div",
+        textSnippet: `Item ${index}`,
+        bbox: { x, y: 40, width: 32, height: 24 },
+        ancestry: [root.locator],
+      });
+      elements.push(element);
+      rawRegions.push({
+        x,
+        y: 40,
+        width: 32,
+        height: 24,
+        pixelCount: 32 * 24,
+        mismatchPercent: 1,
+        kind: "layout" as const,
+        severity: "medium" as const,
+      });
+    }
+
+    const snapshot: DomSnapshot = {
+      root,
+      elements,
+      bindingCandidates: elements,
+    };
+    const image = createImage(600, 400, 255);
+
+    for (const element of elements) {
+      fillRect(image, element.bbox.x, element.bbox.y, element.bbox.width, element.bbox.height, 20);
+    }
+
+    const result = localizeElementGroups({
+      preview: toRgba(image),
+      reference: toRgba(image),
+      width: image.width,
+      height: image.height,
+      rawRegions,
+      domSnapshot: snapshot,
+    });
+
+    expect(result.profile.counts.groupsSkippedDueToBudget).toBeGreaterThan(0);
+    expect(result.summary.processedGroups).toBe(14);
+    expect(result.summary.correspondenceCoverage).toBeLessThan(1);
+  });
 });

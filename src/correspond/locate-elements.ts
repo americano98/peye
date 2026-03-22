@@ -108,8 +108,12 @@ export function localizeElementGroups(params: {
   profile.timingsMs.cacheBuild = roundMetric(performance.now() - cacheStart);
 
   const localizationsByGroupId = new Map<string, GroupLocalization>();
+  const attemptedGroupIds = new Set<string>();
   const coarseStart = performance.now();
   const refinementStart = { value: 0 };
+  const mismatchTargetGroupIds = new Set(
+    groupBuild.groups.filter((group) => group.mismatchWeight > 0).map((group) => group.id),
+  );
 
   for (const groupId of groupBuild.searchGroupIds) {
     const group = groupBuild.groupsById.get(groupId);
@@ -119,6 +123,7 @@ export function localizeElementGroups(params: {
     }
 
     profile.counts.groupsSearched += 1;
+    attemptedGroupIds.add(groupId);
     const result = localizeSingleGroup({
       groupId,
       groupBox: group.bbox,
@@ -169,7 +174,14 @@ export function localizeElementGroups(params: {
       projectedPadding: CORRESPONDENCE_PROJECTED_REFINEMENT_PADDING_PX,
     });
 
-    recordLocalizationAttempt(profile, localizationsByGroupId, candidate.group.id, result, false);
+    recordLocalizationAttempt(
+      profile,
+      localizationsByGroupId,
+      attemptedGroupIds,
+      candidate.group.id,
+      result,
+      false,
+    );
   }
 
   const childLocalCandidates = buildChildLocalSearchCandidates(
@@ -194,7 +206,14 @@ export function localizeElementGroups(params: {
       projectedPadding: candidate.padding,
     });
 
-    recordLocalizationAttempt(profile, localizationsByGroupId, candidate.group.id, result, false);
+    recordLocalizationAttempt(
+      profile,
+      localizationsByGroupId,
+      attemptedGroupIds,
+      candidate.group.id,
+      result,
+      false,
+    );
   }
 
   const relativeIconCandidates = buildRelativeTinyGraphicsCandidates(
@@ -217,7 +236,14 @@ export function localizeElementGroups(params: {
       projectedPadding: candidate.padding,
     });
 
-    recordLocalizationAttempt(profile, localizationsByGroupId, candidate.group.id, result, false);
+    recordLocalizationAttempt(
+      profile,
+      localizationsByGroupId,
+      attemptedGroupIds,
+      candidate.group.id,
+      result,
+      false,
+    );
   }
 
   const fallbackCandidates = buildSpecializedFallbackCandidates(
@@ -243,16 +269,27 @@ export function localizeElementGroups(params: {
         : {}),
     });
 
-    recordLocalizationAttempt(profile, localizationsByGroupId, candidate.group.id, result, true);
+    recordLocalizationAttempt(
+      profile,
+      localizationsByGroupId,
+      attemptedGroupIds,
+      candidate.group.id,
+      result,
+      true,
+    );
   }
 
   projectChildLocalizations(groupBuild.groupsById, localizationsByGroupId);
-  const allLocalized = [...localizationsByGroupId.values()].filter(
-    (localization) => localization.attempted,
+  const summaryLocalizations = [...mismatchTargetGroupIds].map(
+    (groupId) => localizationsByGroupId.get(groupId) ?? null,
   );
-  const reliable = allLocalized.filter((localization) => localization.reliable);
-  const ambiguous = allLocalized.filter(
-    (localization) => localization.ambiguity > CORRESPONDENCE_AMBIGUITY_THRESHOLD,
+  const reliable = summaryLocalizations.filter(
+    (localization): localization is GroupLocalization =>
+      localization !== null && localization.reliable && localization.method !== "projected",
+  );
+  const ambiguous = summaryLocalizations.filter(
+    (localization) =>
+      localization !== null && localization.ambiguity > CORRESPONDENCE_AMBIGUITY_THRESHOLD,
   ).length;
 
   return {
@@ -262,11 +299,13 @@ export function localizeElementGroups(params: {
     elementToGroupId: groupBuild.elementToGroupId,
     localizationsByGroupId,
     summary: {
-      processedGroups: allLocalized.length,
+      processedGroups: mismatchTargetGroupIds.size,
       reliableGroups: reliable.length,
       ambiguousCorrespondences: ambiguous,
       correspondenceCoverage:
-        allLocalized.length === 0 ? 0 : roundMetric(reliable.length / allLocalized.length),
+        mismatchTargetGroupIds.size === 0
+          ? 0
+          : roundMetric(reliable.length / mismatchTargetGroupIds.size),
       correspondenceConfidence:
         reliable.length === 0
           ? 0
@@ -771,10 +810,13 @@ interface LocalizationAttemptMetrics {
 function recordLocalizationAttempt(
   profile: CorrespondenceProfile,
   localizationsByGroupId: Map<string, GroupLocalization>,
+  attemptedGroupIds: Set<string>,
   groupId: string,
   result: LocalizationAttemptMetrics,
   persistMissing: boolean,
 ): void {
+  attemptedGroupIds.add(groupId);
+
   if (!result.localization.found && !persistMissing) {
     return;
   }

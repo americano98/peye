@@ -133,7 +133,8 @@ export async function runCompare(options: CompareCommandOptions): Promise<Comple
       return result;
     })();
     const corresponded =
-      finalPreparedPreview.analysisMode === "dom-elements" && finalPreparedPreview.domSnapshot !== null
+      finalPreparedPreview.analysisMode === "dom-elements" &&
+      finalPreparedPreview.domSnapshot !== null
         ? localizeElementGroups({
             preview: paddedPreview.data,
             reference: paddedReference.data,

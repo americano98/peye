@@ -369,6 +369,90 @@ describe("runCompare integration", () => {
     }
   });
 
+  test("waits for selector subtree content to stabilize even when outer box size does not change", async () => {
+    const dir = await createTempDir("peye-stability-content");
+    const referencePath = path.join(dir, "reference.png");
+
+    await createPngFromSvg({
+      outputPath: referencePath,
+      width: 240,
+      height: 140,
+      body: `
+        <rect x="20" y="20" width="160" height="40" fill="#0b84ff" />
+        <rect x="32" y="32" width="72" height="12" fill="#ffffff" />
+      `,
+    });
+
+    const server = await startServer((request, response) => {
+      if (request.url === "/" || request.url === "/index.html" || request.url === "/#hero") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`
+          <!doctype html>
+          <html>
+            <head>
+              <style>
+                html, body { margin: 0; padding: 0; background: #ffffff; }
+                #hero { position: relative; width: 240px; height: 140px; }
+                #hero .panel {
+                  position: absolute;
+                  left: 20px;
+                  top: 20px;
+                  width: 160px;
+                  height: 40px;
+                  background: #0b84ff;
+                }
+                #hero .inner {
+                  position: absolute;
+                  left: 12px;
+                  top: 12px;
+                  width: 72px;
+                  height: 12px;
+                  background: #ffffff;
+                }
+              </style>
+            </head>
+            <body>
+              <section id="hero">
+                <div class="panel"></div>
+              </section>
+              <script>
+                window.setTimeout(() => {
+                  const panel = document.querySelector('#hero .panel');
+                  if (panel) {
+                    const inner = document.createElement('div');
+                    inner.className = 'inner';
+                    panel.appendChild(inner);
+                  }
+                }, 120);
+              </script>
+            </body>
+          </html>
+        `);
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("not found");
+    });
+
+    try {
+      const result = await runCompare(
+        await buildOptions({
+          preview: `${server.baseUrl}/#hero`,
+          reference: referencePath,
+          output: path.join(dir, "out"),
+          viewport: "400x240",
+          mode: "layout",
+        }),
+      );
+
+      expect(result.report.summary.recommendation).toBe("pass");
+      expect(result.report.findings).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
   test("ignores overlapping fixed preview noise and reports selector match counts", async () => {
     const dir = await createTempDir("peye-ignore-fixed");
     const referencePath = path.join(dir, "reference.png");

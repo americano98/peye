@@ -716,14 +716,15 @@ function buildDraftFinding(params: {
     textValidation,
     geometry,
   );
-  const code =
-    params.correspondence &&
-    !params.correspondence.reliable &&
-    textDrivenCode !== "text_clipping" &&
-    textDrivenCode !== "capture_crop" &&
-    textDrivenCode !== "viewport_mismatch"
-      ? "missing_or_extra_content"
-      : textDrivenCode;
+  const code = shouldTreatAsMissingOrExtra({
+    correspondence: params.correspondence,
+    textDrivenCode,
+    geometry,
+    siblingRelation: params.siblingRelation,
+    textValidation,
+  })
+    ? "missing_or_extra_content"
+    : textDrivenCode;
   const hotspots = buildHotspotBoxes(params.regions, primaryBox);
   const issueTypes = mergeIssueTypesForTextValidation(
     mergeIssueTypesForSiblingRelation(
@@ -796,6 +797,36 @@ function buildDraftFinding(params: {
     ...(params.siblingRelation ? { siblingRelation: params.siblingRelation } : {}),
     ...(textValidation ? { textValidation } : {}),
   };
+}
+
+function shouldTreatAsMissingOrExtra(params: {
+  correspondence?: GroupLocalization | undefined;
+  textDrivenCode: FindingCode;
+  geometry?: FindingReport["geometry"];
+  siblingRelation?: FindingReport["siblingRelation"];
+  textValidation?: FindingReport["textValidation"];
+}): boolean {
+  if (!params.correspondence || params.correspondence.reliable) {
+    return false;
+  }
+
+  if (
+    params.textDrivenCode === "text_clipping" ||
+    params.textDrivenCode === "capture_crop" ||
+    params.textDrivenCode === "viewport_mismatch"
+  ) {
+    return false;
+  }
+
+  if (
+    hasMeaningfulTextValidation(params.textValidation) ||
+    hasMeaningfulGeometryDrift(params.geometry) ||
+    hasMeaningfulSiblingRelationDrift(params.siblingRelation)
+  ) {
+    return false;
+  }
+
+  return params.correspondence.method === "none" || !params.correspondence.found;
 }
 
 function buildContextForElement(

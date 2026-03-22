@@ -16,8 +16,7 @@ export function runCoarseSearch(params: {
   referenceCache: ReferenceSearchCache;
   maxCandidates?: number;
 }): { candidates: CoarseCandidate[]; denseFallbackUsed: boolean } {
-  const maxCandidates =
-    params.maxCandidates ?? CORRESPONDENCE_MAX_CANDIDATES_PER_GROUP;
+  const maxCandidates = params.maxCandidates ?? CORRESPONDENCE_MAX_CANDIDATES_PER_GROUP;
   const level = selectCacheLevel(params.referenceCache, params.searchWindow);
   const scaledWindow = scaleBox(params.searchWindow, level.scale);
   const previewGrayScaled = resizeToDimensions(
@@ -32,10 +31,7 @@ export function runCoarseSearch(params: {
   );
   const referenceGrayWindow = cropImage(level.gray, scaledWindow);
   const referenceEdgeWindow = cropImage(level.edge, scaledWindow);
-  const previewSignature = buildWindowSignature(
-    previewGrayScaled,
-    previewEdgeScaled,
-  );
+  const previewSignature = buildWindowSignature(previewGrayScaled, previewEdgeScaled);
   const stride = coarseStride(previewGrayScaled);
   const maxX = referenceGrayWindow.width - previewGrayScaled.width;
   const maxY = referenceGrayWindow.height - previewGrayScaled.height;
@@ -94,10 +90,7 @@ export function runCoarseSearch(params: {
   };
 }
 
-export function buildWindowSignature(
-  gray: ImageLike,
-  edge: ImageLike,
-): WindowSignature {
+export function buildWindowSignature(gray: ImageLike, edge: ImageLike): WindowSignature {
   const thumbGray = resizeToDimensions(gray, 8, 8);
   const thumbEdge = resizeToDimensions(edge, 8, 8);
   const thumbnail = new Float32Array(64);
@@ -134,29 +127,18 @@ export function buildWindowSignature(
   };
 }
 
-function signatureSimilarity(
-  left: WindowSignature,
-  right: WindowSignature,
-): number {
+function signatureSimilarity(left: WindowSignature, right: WindowSignature): number {
   const thumbnail = 1 - meanAbsoluteDiff(left.thumbnail, right.thumbnail);
   const horizontal =
-    1 -
-    meanAbsoluteDiff(
-      left.horizontalEdgeProjection,
-      right.horizontalEdgeProjection,
-    );
-  const vertical =
-    1 -
-    meanAbsoluteDiff(left.verticalEdgeProjection, right.verticalEdgeProjection);
-  const density =
-    1 - Math.min(1, Math.abs(left.edgeDensity - right.edgeDensity));
+    1 - meanAbsoluteDiff(left.horizontalEdgeProjection, right.horizontalEdgeProjection);
+  const vertical = 1 - meanAbsoluteDiff(left.verticalEdgeProjection, right.verticalEdgeProjection);
+  const density = 1 - Math.min(1, Math.abs(left.edgeDensity - right.edgeDensity));
   const fill = 1 - Math.min(1, Math.abs(left.fillRatio - right.fillRatio));
   const aspect =
     1 -
     Math.min(
       1,
-      Math.abs(Math.log(left.aspectRatio / Math.max(0.01, right.aspectRatio))) /
-        Math.log(2),
+      Math.abs(Math.log(left.aspectRatio / Math.max(0.01, right.aspectRatio))) / Math.log(2),
     );
 
   return roundMetric(
@@ -176,17 +158,11 @@ function selectCacheLevel(
   const area = searchWindow.width * searchWindow.height;
 
   if (area > 220_000) {
-    return (
-      cache.levels.find((level) => level.scale === 0.25) ?? cache.levels.at(-1)!
-    );
+    return cache.levels.find((level) => level.scale === 0.25) ?? cache.levels.at(-1)!;
   }
 
   if (area > 60_000) {
-    return (
-      cache.levels.find((level) => level.scale === 0.5) ??
-      cache.levels[1] ??
-      cache.levels[0]
-    );
+    return cache.levels.find((level) => level.scale === 0.5) ?? cache.levels[1] ?? cache.levels[0];
   }
 
   return cache.levels[0];
@@ -197,9 +173,7 @@ function insertCandidate(
   candidate: CoarseCandidate,
   limit: number,
 ): void {
-  let insertIndex = candidates.findIndex(
-    (existing) => candidate.score > existing.score,
-  );
+  let insertIndex = candidates.findIndex((existing) => candidate.score > existing.score);
 
   if (insertIndex === -1) {
     insertIndex = candidates.length;
@@ -235,10 +209,7 @@ function normalizeVector(vector: Float32Array): void {
 }
 
 function coarseStride(image: ImageLike): number {
-  return Math.max(
-    4,
-    Math.min(8, Math.floor(Math.min(image.width, image.height) / 3) || 4),
-  );
+  return Math.max(4, Math.min(8, Math.floor(Math.min(image.width, image.height) / 3) || 4));
 }
 
 function scaleBox(box: BoundingBox, scale: number): BoundingBox {

@@ -141,10 +141,7 @@ async function navigateForCapture(page: Page, url: string): Promise<void> {
   });
 }
 
-async function waitForCaptureStability(
-  page: Page,
-  locator?: Locator,
-): Promise<void> {
+async function waitForCaptureStability(page: Page, locator?: Locator): Promise<void> {
   await waitForFontsReady(page);
   await waitForLayoutStability(page, locator);
 }
@@ -178,9 +175,7 @@ async function waitForLayoutStability(page: Page, locator?: Locator): Promise<vo
   let stableCount = 0;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const sample = locator
-      ? await sampleLocatorLayout(locator)
-      : await samplePageLayout(page);
+    const sample = locator ? await sampleLocatorLayout(locator) : await samplePageLayout(page);
 
     if (sample && sample === previousSample) {
       stableCount += 1;
@@ -200,18 +195,22 @@ async function waitForLayoutStability(page: Page, locator?: Locator): Promise<vo
 }
 
 async function sampleLocatorLayout(locator: Locator): Promise<string | null> {
-  const box = await locator.boundingBox().catch(() => null);
+  return locator
+    .evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const textContentLength = (element.textContent ?? "").trim().length;
 
-  if (!box) {
-    return null;
-  }
-
-  return JSON.stringify({
-    x: Math.round(box.x),
-    y: Math.round(box.y),
-    width: Math.round(box.width),
-    height: Math.round(box.height),
-  });
+      return JSON.stringify({
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        textContentLength,
+        childElementCount: element.childElementCount,
+        descendantCount: element.querySelectorAll("*").length,
+      });
+    })
+    .catch(() => null);
 }
 
 async function samplePageLayout(page: Page): Promise<string | null> {
@@ -219,12 +218,15 @@ async function samplePageLayout(page: Page): Promise<string | null> {
     .evaluate(() => {
       const doc = document.documentElement;
       const body = document.body;
+      const textContentLength = (body?.innerText ?? "").trim().length;
 
       return JSON.stringify({
         innerWidth: Math.round(window.innerWidth),
         innerHeight: Math.round(window.innerHeight),
         scrollWidth: Math.round(Math.max(doc.scrollWidth, body?.scrollWidth ?? 0)),
         scrollHeight: Math.round(Math.max(doc.scrollHeight, body?.scrollHeight ?? 0)),
+        textContentLength,
+        elementCount: document.querySelectorAll("*").length,
       });
     })
     .catch(() => null);
